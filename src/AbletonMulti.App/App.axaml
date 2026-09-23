@@ -1,0 +1,70 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AbletonMulti.App.App"
+             RequestedThemeVariant="Default">
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="PageBackground" Color="#F4F4F6" />
+                    <SolidColorBrush x:Key="CardBackground" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="CardBorder" Color="#E2E2E7" />
+                    <SolidColorBrush x:Key="InsetBackground" Color="#F0F0F3" />
+                    <SolidColorBrush x:Key="SubtleText" Color="#6B6D78" />
+                    <SolidColorBrush x:Key="DropStroke" Color="#B8BAC4" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="PageBackground" Color="#17171A" />
+                    <SolidColorBrush x:Key="CardBackground" Color="#212125" />
+                    <SolidColorBrush x:Key="CardBorder" Color="#303036" />
+                    <SolidColorBrush x:Key="InsetBackground" Color="#2A2A2F" />
+                    <SolidColorBrush x:Key="SubtleText" Color="#9A9CA6" />
+                    <SolidColorBrush x:Key="DropStroke" Color="#4A4B53" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+            <FontFamily x:Key="AppFont">Segoe UI, Yu Gothic UI, Meiryo UI, Hiragino Sans, Hiragino Kaku Gothic ProN, Noto Sans CJK JP, Inter</FontFamily>
+            <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas, Menlo, Yu Gothic UI, Hiragino Sans, monospace</FontFamily>
+        </ResourceDictionary>
+    </Application.Resources>
+
+    <Application.Styles>
+        <FluentTheme />
+
+        <Style Selector="Window">
+            <Setter Property="FontFamily" Value="{StaticResource AppFont}" />
+            <Setter Property="Background" Value="{DynamicResource PageBackground}" />
+        </Style>
+        <Style Selector="Border.card">
+            <Setter Property="Background" Value="{DynamicResource CardBackground}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource CardBorder}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Padding" Value="16" />
+        </Style>
+        <Style Selector="Border.pill">
+            <Setter Property="CornerRadius" Value="999" />
+            <Setter Property="Padding" Value="9,2" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Border.pill > TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="TextBlock.subtle">
+            <Setter Property="Foreground" Value="{DynamicResource SubtleText}" />
+        </Style>
+        <Style Selector="TextBlock.mono">
+            <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+        <!-- スクロールバーがカードに重ならないよう右に余白 -->
+        <Style Selector="ItemsControl.list">
+            <Setter Property="Margin" Value="0,0,16,8" />
+        </Style>
+        <Style Selector="TabItem">
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="MinHeight" Value="40" />
+        </Style>
+    </Application.Styles>
+</Application>

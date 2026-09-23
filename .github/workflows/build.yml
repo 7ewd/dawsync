@@ -1,0 +1,38 @@
+# Windows / Mac 両方の配布ファイルを自動で作る。
+# GitHub に push すると Actions タブの「Artifacts」からダウンロードできる。
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: ./build/publish-windows.ps1
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AbletonMulti-windows
+          path: dist/AbletonMulti-windows.zip
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        rid: [osx-arm64, osx-x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: chmod +x build/publish-macos.sh && ./build/publish-macos.sh ${{ matrix.rid }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AbletonMulti-${{ matrix.rid }}
+          path: dist/AbletonMulti-${{ matrix.rid }}.zip
