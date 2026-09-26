@@ -7,13 +7,16 @@
     <AssemblyName>AbletonMulti</AssemblyName>
     <Product>AbletonMulti</Product>
     <Version>0.1.0</Version>
-    <!-- 配布用: .NET を入れていない PC でもダブルクリックで起動できる 1 ファイルにまとめる -->
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <!-- 配布用（dotnet publish のときだけ）: .NET を入れていない PC でもダブルクリックで起動できる 1 ファイルにまとめる -->
+  <PropertyGroup Condition="'$(_IsPublishing)' == 'true'">
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <!-- SkiaSharp 等のネイティブ .pdb が配布フォルダに混ざらないようにする -->

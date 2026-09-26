@@ -16,17 +16,19 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var window = new MainWindow();
-            // .als をアプリにドロップして起動した場合や「このアプリで開く」の場合
+            // 開発用: --host / --publish / --join アドレス --key 合言葉 / --screenshot 画像 [--delay 秒]
             var args = desktop.Args ?? [];
-            var als = args.FirstOrDefault(a => a.EndsWith(".als", StringComparison.OrdinalIgnoreCase));
-            var shotIndex = Array.IndexOf(args, "--screenshot"); // 開発用: 画面を PNG に書き出して終了
+            string? Option(string name) => Array.IndexOf(args, name) is var i and >= 0 && i + 1 < args.Length ? args[i + 1] : null;
             window.Opened += async (_, _) =>
             {
-                if (als is not null) await window.LoadAsync(als);
-                if (shotIndex >= 0 && shotIndex + 1 < args.Length)
+                if (args.Contains("--host")) await window.SessionPage.HostAsync();
+                if (args.Contains("--publish")) await window.SessionPage.PublishForDevAsync();
+                if (Option("--join") is { } address) await window.SessionPage.JoinAsync(address, Option("--key"));
+                if (Option("--screenshot") is { } shot)
                 {
-                    var tabIndex = Array.IndexOf(args, "--tab") is var ti and >= 0 && ti + 1 < args.Length ? int.Parse(args[ti + 1]) : 0;
-                    await window.SaveScreenshotAsync(args[shotIndex + 1], tabIndex);
+                    if (Option("--delay") is { } delay)
+                        await Task.Delay(TimeSpan.FromSeconds(double.Parse(delay, System.Globalization.CultureInfo.InvariantCulture)));
+                    await window.SaveScreenshotAsync(shot);
                     desktop.Shutdown();
                 }
             };

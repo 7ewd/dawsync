@@ -5,3 +5,8 @@ dist/
 .idea/
 *.user
 *.als
+bitwig/*/build/
+tests/sim/logs/
+tests/bitwig/logs/
+__pycache__/
+*.pyc
