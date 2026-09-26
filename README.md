@@ -52,6 +52,23 @@ Live の人と Bitwig の人が同じルームで同時編集できる（アプ�
   （Bitwig 側はテスト用のポート 47490 につなぐので、本物の Live が起動していても影響しない。でたらめな同時編集のテストも入っている。
   `FUZZ_SEEDS=1,2,3` で回数を変えられる）
 
+## REAPER とも一緒に使える（試作）
+
+REAPER に入れる Lua スクリプト（`reaper/AbletonMulti/`）が Live の Remote Script と同じやりとりをするので、
+Live・Bitwig・REAPER の人が同じルームで同時編集できる。
+
+- 入れ方: アプリの「REAPER にスクリプトを入れる」→ REAPER を再起動（`Scripts/__startup.lua` から自動で起動する）
+- 同期するもの: テンポ・拍子、トラックの追加・削除・並べ替え・名前・色、フォルダ（= グループ。REAPER 側で自動で作る・解除する）、
+  アイテム（= アレンジメントのクリップ）の位置・長さ・名前・色・ループ、MIDI ノート、オーディオ（ファイル・ピッチ）
+- 同期しないもの: ミキサー、FX、ワープ（REAPER のストレッチマーカー）、クリップランチャー（REAPER には無い）
+- REAPER のトラックには MIDI／オーディオの区別が無いので、相手から来たトラックは種類を覚えておき、
+  REAPER で作ったトラックは中身で決める（MIDI のアイテムがあるか空なら MIDI）
+- REAPER の Lua には通信の機能が無いので、ファイルでやりとりし、アプリの `ReaperRelay` が TCP に中継する
+  （`<REAPER の設定フォルダ>/AbletonMulti/ipc/<ポート>/`）
+- 相手の変更は REAPER の Undo 1 回分にまとまる。相手がテンポを変えても、アイテムは拍の位置のまま（Live と同じ）
+- テスト（本物の REAPER + モックの Live）: REAPER で捨ててよいプロジェクトを開いて `python tests/reaper/live_reaper.py`
+  （テスト用のポート 47491 を使うので、本物の Live やアプリには影響しない）
+
 ## プロジェクトチェック
 
 `.als` を読み込んで、共有する前に直すべきところをチェックする。
@@ -72,6 +89,8 @@ Live の人と Bitwig の人が同じルームで同時編集できる（アプ�
 | `tests/sim` | Live のモックと同時編集のテスト |
 | `bitwig/bridge` | Bitwig 用の拡張（Java） |
 | `tests/bitwig` | 本物の Bitwig とモックの Live で同時編集のテスト |
+| `reaper/AbletonMulti` | REAPER 用のスクリプト（Lua） |
+| `tests/reaper` | 本物の REAPER とモックの Live で同時編集のテスト |
 
 ## 開発
 

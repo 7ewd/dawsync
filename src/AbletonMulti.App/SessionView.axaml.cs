@@ -86,6 +86,7 @@ public partial class SessionView : UserControl
 
         InstallButton.Click += (_, _) => InstallScript();
         BitwigInstallButton.Click += (_, _) => InstallBitwigExtension();
+        ReaperInstallButton.Click += (_, _) => InstallReaperScript();
         HowToToggle.Click += (_, _) => ShowHowTo(!HowToPanel.IsVisible);
         HostButton.Click += async (_, _) =>
         {
@@ -348,6 +349,21 @@ public partial class SessionView : UserControl
         Refresh();
     }
 
+    private void InstallReaperScript()
+    {
+        try
+        {
+            var path = ReaperScriptInstaller.Install();
+            ShowHowTo(true);
+            AddActivity(new ActivityEntry(DateTime.Now, ActivityKind.System, "", $"REAPER にスクリプトを入れました（REAPER を再起動すると動きます）: {path}"));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            AddActivity(new ActivityEntry(DateTime.Now, ActivityKind.Warning, "", $"REAPER にスクリプトを入れられませんでした: {e.Message}"));
+        }
+        Refresh();
+    }
+
     private async void OnCopyAddress(object? sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string address } button && TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard)
@@ -371,19 +387,28 @@ public partial class SessionView : UserControl
         else if (live.IsConnected)
             SetStatus(LiveDot, LiveStatus, Palette.Green, $"{live.DawName} とつながっています");
         else
-            SetStatus(LiveDot, LiveStatus, Palette.Amber, "Ableton Live か Bitwig を待っています…");
+            SetStatus(LiveDot, LiveStatus, Palette.Amber, "Ableton Live・Bitwig・REAPER のどれかを待っています…");
 
         // つながっていれば手順は不要（古いスクリプトのときだけ更新を促す）
         HowToToggle.IsVisible = !live.IsConnected;
         if (live.IsConnected) ShowHowTo(false);
         // Live だけ／Bitwig だけの PC では、使わない方のボタンは出さない（どちらも見つからなければ Live 用を出す）
         var bitwigPresent = BitwigExtensionInstaller.IsBitwigPresent();
-        var livePresent = RemoteScriptInstaller.IsLivePresent() || !bitwigPresent;
+        var reaperPresent = ReaperScriptInstaller.IsReaperPresent();
+        var livePresent = RemoteScriptInstaller.IsLivePresent() || (!bitwigPresent && !reaperPresent);
         (InstallButton.Content, InstallButton.IsVisible) = scriptState switch
         {
             _ when !livePresent => ("", false),
             ScriptInstallState.NotInstalled => ("Live にスクリプトを入れる", true),
             ScriptInstallState.Outdated => ("スクリプトを更新する（そのあと Live を再起動）", true),
+            _ => ("", false),
+        };
+        var reaperState = ReaperScriptInstaller.GetState();
+        (ReaperInstallButton.Content, ReaperInstallButton.IsVisible) = reaperState switch
+        {
+            _ when !reaperPresent => ("", false),
+            ScriptInstallState.NotInstalled => ("REAPER にスクリプトを入れる", true),
+            ScriptInstallState.Outdated => ("REAPER のスクリプトを更新する（そのあと REAPER を再起動）", true),
             _ => ("", false),
         };
         var bitwigState = BitwigExtensionInstaller.GetState();
@@ -394,7 +419,8 @@ public partial class SessionView : UserControl
             ScriptInstallState.Outdated => ("Bitwig の拡張を更新する", true),
             _ => ("", false),
         };
-        if ((scriptState == ScriptInstallState.NotInstalled || bitwigPresent && bitwigState == ScriptInstallState.NotInstalled)
+        if ((scriptState == ScriptInstallState.NotInstalled || bitwigPresent && bitwigState == ScriptInstallState.NotInstalled
+             || reaperPresent && reaperState == ScriptInstallState.NotInstalled)
             && !live.IsConnected && !_howToShownOnce)
         {
             _howToShownOnce = true;
@@ -430,7 +456,7 @@ public partial class SessionView : UserControl
         var (color, title, detail, resync) =
             !_session.InRoom ? (Palette.Gray, "ルームに入っていません", "", false)
             : _session.PausedReason is { } reason ? (Palette.Red, "同期を止めています", reason, true)
-            : !live.IsConnected ? (Palette.Amber, "Ableton Live / Bitwig がつながっていません", "", false)
+            : !live.IsConnected ? (Palette.Amber, "Ableton Live / Bitwig / REAPER がつながっていません", "", false)
             : _session.WaitingForHost ? (Palette.Amber, "ホストを待っています", "", false)
             : (Palette.Green, "同時編集中", "", false);
         Banner.Background = Palette.Tint(color, 0x1F);

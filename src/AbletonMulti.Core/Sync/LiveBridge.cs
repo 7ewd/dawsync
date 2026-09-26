@@ -32,11 +32,11 @@ public sealed class LiveBridge : IAsyncDisposable
     public bool IsConnected => _connection is not null;
     public string? LiveVersion { get; private set; }
 
-    /// <summary>つながっている DAW（"live" か "bitwig"）。</summary>
+    /// <summary>つながっている DAW（"live"・"bitwig"・"reaper"）。</summary>
     public string Daw { get; private set; } = "live";
 
     /// <summary>画面に出す DAW の名前（「Ableton Live 12.4.6」「Bitwig Studio 6.0」など）。</summary>
-    public string DawName => Daw == "bitwig" ? LiveVersion ?? "Bitwig Studio" : $"Ableton Live {LiveVersion}".TrimEnd();
+    public string DawName => Daw == "live" ? $"Ableton Live {LiveVersion}".TrimEnd() : LiveVersion ?? Daw;
     public string? ScriptVersion { get; private set; }
     public int ScriptProtocolVersion { get; private set; }
     /// <summary>Live で使える機能の報告（不具合の調査用）</summary>

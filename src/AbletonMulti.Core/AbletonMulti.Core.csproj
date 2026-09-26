@@ -11,6 +11,11 @@
     <EmbeddedResource Include="RemoteScript\AbletonMulti\*.py" LogicalName="RemoteScript/%(Filename)%(Extension)" />
   </ItemGroup>
 
+  <!-- REAPER に入れるスクリプト（Lua） -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\reaper\AbletonMulti\*.lua" LogicalName="ReaperScript/%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <!-- Bitwig に入れる拡張（bitwig/build.sh で作る。Bitwig の内部 API を使うので、Bitwig のある PC でビルドしてここに置く） -->
   <ItemGroup>
     <EmbeddedResource Include="BitwigExtension\AbletonMulti.bwextension" LogicalName="BitwigExtension/AbletonMulti.bwextension"

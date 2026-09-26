@@ -33,7 +33,7 @@
                 <!-- ① DAW（Live / Bitwig） -->
                 <Border Classes="card" Padding="18">
                     <StackPanel Spacing="10">
-                        <TextBlock Classes="step" Text="① Ableton Live / Bitwig とつなぐ" />
+                        <TextBlock Classes="step" Text="① Ableton Live / Bitwig / REAPER とつなぐ" />
                         <StackPanel Orientation="Horizontal" Spacing="9">
                             <Ellipse x:Name="LiveDot" Classes="dot" />
                             <TextBlock x:Name="LiveStatus" FontSize="14" VerticalAlignment="Center" TextWrapping="Wrap" />
@@ -41,6 +41,8 @@
                         <Button x:Name="InstallButton" Classes="accent" HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Center" Padding="0,8" />
                         <Button x:Name="BitwigInstallButton" Classes="accent" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" Padding="0,8" />
+                        <Button x:Name="ReaperInstallButton" Classes="accent" HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Center" Padding="0,8" />
                         <Button x:Name="HowToToggle" Classes="link" Content="つなぎ方を見る ▾" />
                         <Border x:Name="HowToPanel" Background="{DynamicResource InsetBackground}" CornerRadius="8" Padding="14,12" IsVisible="False">
@@ -52,6 +54,9 @@
                                 <TextBlock FontSize="13" FontWeight="SemiBold" Margin="0,6,0,0" Text="Bitwig Studio" />
                                 <TextBlock TextWrapping="Wrap" FontSize="13" Text="1. 上のボタンで Bitwig に拡張を入れる" />
                                 <TextBlock TextWrapping="Wrap" FontSize="13" Text="2. Bitwig の「設定」→「コントローラー」→「Add Controller」で、左を「AbletonMulti」にして「AbletonMulti」を追加" />
+                                <TextBlock FontSize="13" FontWeight="SemiBold" Margin="0,6,0,0" Text="REAPER" />
+                                <TextBlock TextWrapping="Wrap" FontSize="13" Text="1. 上のボタンで REAPER にスクリプトを入れる" />
+                                <TextBlock TextWrapping="Wrap" FontSize="13" Text="2. REAPER を起動（起動中なら再起動）。あとは自動でつながります" />
                             </StackPanel>
                         </Border>
                     </StackPanel>

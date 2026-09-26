@@ -10,3 +10,4 @@ tests/sim/logs/
 tests/bitwig/logs/
 __pycache__/
 *.pyc
+tests/reaper/logs/

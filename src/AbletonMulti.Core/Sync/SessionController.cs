@@ -94,7 +94,15 @@ public sealed class SessionController : IAsyncDisposable
 
     public bool ScriptOutdated => Bridge.IsConnected && Bridge.ScriptProtocolVersion != LiveBridge.ScriptProtocol;
 
-    public void StartBridge(int port = LiveBridge.DefaultPort) => Bridge.Start(port);
+    public void StartBridge(int port = LiveBridge.DefaultPort)
+    {
+        Bridge.Start(port);
+        // REAPER のスクリプトはファイルでやりとりするので、中継して同じポートにつなぐ
+        _reaper ??= new ReaperRelay(port);
+        _reaper.Start();
+    }
+
+    private ReaperRelay? _reaper;
 
     // ---- ルーム ----
 
@@ -248,9 +256,12 @@ public sealed class SessionController : IAsyncDisposable
                 await Bridge.MakeBlankAsync(TimeSpan.FromSeconds(30));
                 _blankPending = false;
                 if (!IsHost) _overwriteNext = true;
-                Log(ActivityKind.System, "", Bridge.Daw == "bitwig"
-                    ? "Bitwig のプロジェクトをまっさら（楽器トラック 1 本）にしました"
-                    : "Live のセットをまっさら（MIDI トラック 1 本）にしました");
+                Log(ActivityKind.System, "", Bridge.Daw switch
+                {
+                    "bitwig" => "Bitwig のプロジェクトをまっさら（楽器トラック 1 本）にしました",
+                    "reaper" => "REAPER のプロジェクトをまっさら（トラック 1 本）にしました",
+                    _ => "Live のセットをまっさら（MIDI トラック 1 本）にしました",
+                });
             }
             if (_overwriteNext) overwrite = true;
 
@@ -261,7 +272,7 @@ public sealed class SessionController : IAsyncDisposable
             {
                 // ルームの最初の状態はホストのセットから作る。ゲストはホストの Live がつながるのを待つ
                 _waitingForHost = true;
-                Log(ActivityKind.System, "", "ホストの DAW（Live か Bitwig）が接続されるのを待っています");
+                Log(ActivityKind.System, "", "ホストの DAW（Live・Bitwig・REAPER）が接続されるのを待っています");
                 Changed?.Invoke();
                 return;
             }
@@ -628,7 +639,7 @@ public sealed class SessionController : IAsyncDisposable
         {
             var dir = DataDirectory;
             Directory.CreateDirectory(dir);
-            File.WriteAllText(Path.Combine(dir, Bridge.Daw == "bitwig" ? "bitwig-api.json" : "live-api.json"), report.ToJsonString(new() { WriteIndented = true }));
+            File.WriteAllText(Path.Combine(dir, $"{Bridge.Daw}-api.json"), report.ToJsonString(new() { WriteIndented = true }));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
@@ -640,6 +651,7 @@ public sealed class SessionController : IAsyncDisposable
         if (_blobs is not null) await _blobs.DisposeAsync();
         if (_server is not null) await _server.DisposeAsync();
         if (_tunnel is not null) await _tunnel.DisposeAsync();
+        if (_reaper is not null) await _reaper.DisposeAsync();
         await Bridge.DisposeAsync();
     }
 }
