@@ -4,7 +4,11 @@ Ableton Live のプロジェクトを Mac / Windows 間で共同編集する試�
 
 [☕ Buy Me a Coffee](https://buymeacoffee.com/7ewd)
 
+[日本語](#日本語) | [English](#english)
+
 ## 日本語
+
+[Englishへ](#english)
 
 ### できること
 
@@ -57,6 +61,8 @@ bash tests/sim/run_sim.sh
 - `tests` — シミュレーションと連携テスト
 
 ## English
+
+[日本語へ](#日本語)
 
 Maltese is an experimental tool for collaborative Ableton Live projects across macOS and Windows. Bitwig Studio and REAPER users can join the same room.
 
