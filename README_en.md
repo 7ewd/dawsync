@@ -14,7 +14,7 @@ DAW Sync lets Ableton Live users collaborate across macOS, Windows, and Linux. B
 - Edit together from Live, Bitwig, and REAPER
 - Password-protected rooms and Cloudflare Quick Tunnel invitations
 - `.als` dependency checks for samples, plug-ins, and Packs
-- English / Japanese interface
+- English / Japanese language
 
 Mixer settings (volume, pan, sends, and effects) remain local to each participant. Live's Remote Script API cannot edit arrangement tempo or time-signature automation, so Live applies the beat-zero value while preserving the remaining map points for other hosts.
 
