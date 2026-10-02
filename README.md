@@ -9,6 +9,8 @@ DAW Sync lets composers work together in real time<br>
 even across different OSs and DAWs<br>
 <b>so you can edit MIDI notes, drop in samples, and share them on the fly.</b>
 
+## Before you use this
+
 <a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a><br>
 ↑I’m broke and jobless, so please toss me some cash for the ideas
 
