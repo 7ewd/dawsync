@@ -964,7 +964,9 @@ public partial class SessionView : UserControl
         if (_secretImage is not null) return _secretImage;
         try
         {
-            using var stream = AssetLoader.Open(new Uri("avares://Maltese.App/Assets/114514.png"));
+            // The app assembly is named Maltese in the project file, so the
+            // Avalonia resource URI uses that assembly name rather than the namespace.
+            using var stream = AssetLoader.Open(new Uri("avares://Maltese/Assets/114514.png"));
             return _secretImage = new Bitmap(stream);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException)
