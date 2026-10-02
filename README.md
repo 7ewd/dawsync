@@ -1,5 +1,7 @@
 # Maltese
 
+![Maltese dog](https://a-z-animals.com/media/maltese-1.jpg)
+
 [English](README_en.md) / [日本語](README_ja.md)
 
 Maltese is an experimental tool for collaborative Ableton Live projects across macOS and Windows. Bitwig Studio and REAPER users can join the same room.

@@ -1,5 +1,7 @@
 # Maltese
 
+![Maltese dog](https://a-z-animals.com/media/maltese-1.jpg)
+
 [English](README_en.md) / [日本語](README_ja.md)
 
 Ableton Live のプロジェクトを Mac / Windows 間で共同編集する試作ツールです。Bitwig Studio と REAPER も同じルームに参加できます。
