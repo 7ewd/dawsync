@@ -27,6 +27,12 @@ Live / Bitwig / REAPER ⇄ Maltese ⇄ 共有ルーム
 2. アプリから Live Remote Script、Bitwig 拡張、または REAPER スクリプトをインストールします。
 3. 招待コードを共有して共同編集を始めます。
 
+## 動作確認済み
+
+- Ableton Live Suite 12（12.4.6）
+- REAPER v7.81
+- Bitwig Studio 6.1
+
 ## 構成
 
 - `src/Maltese.Core` — `.als` 解析、同期処理、依存関係チェック

@@ -23,6 +23,12 @@ Mixer settings (volume, pan, sends, and FX) are not synchronized. Back up import
 2. Install the Live Remote Script, Bitwig extension, or REAPER script from the app.
 3. Share the invite code and start collaborating.
 
+## Tested with
+
+- Ableton Live Suite 12 (12.4.6)
+- REAPER v7.81
+- Bitwig Studio 6.1
+
 ## Project layout
 
 - `src/Maltese.Core` — `.als` parsing, sync logic, dependency checks
