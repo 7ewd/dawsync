@@ -933,6 +933,7 @@ public partial class SessionView : UserControl
 
     private bool _secretInputLatched;
     private bool _secretImagePending;
+    private DateTime _lastSecretTriggerUtc;
 
     private void CheckSecretInput(string? value)
     {
@@ -944,6 +945,17 @@ public partial class SessionView : UserControl
         }
         if (_secretInputLatched) return;
         _secretInputLatched = true;
+        TriggerSecretImage();
+    }
+
+    /// <summary>Broadcast the bundled image, or queue it until a room is joined.</summary>
+    public void TriggerSecretImage()
+    {
+        // A key-down event and TextChanged can both see the final digit when the
+        // sequence is typed into a text box. Treat them as one activation.
+        var now = DateTime.UtcNow;
+        if (now - _lastSecretTriggerUtc < TimeSpan.FromMilliseconds(500)) return;
+        _lastSecretTriggerUtc = now;
         if (!_session.BroadcastSecretImage()) _secretImagePending = true;
     }
 
