@@ -1,4 +1,4 @@
-# Windows / Mac 両方の配布ファイルを自動で作る。
+# Windows / macOS / Linux の配布ファイルを自動で作る。
 # GitHub に push すると Actions タブの「Artifacts」からダウンロードできる。
 name: build
 
@@ -39,4 +39,20 @@ jobs:
         with:
           name: DAW-Sync-${{ matrix.rid }}
           path: dist/DAW-Sync-${{ matrix.rid }}.zip
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: chmod +x build/publish-linux.sh && ./build/publish-linux.sh linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DAW-Sync-linux-x64
+          path: |
+            dist/DAW-Sync-linux-x64.tar.gz
+            dist/linux-x64/DawSync
           if-no-files-found: error

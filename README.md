@@ -4,7 +4,7 @@
 
 [English](README_en.md) / [日本語](README_ja.md)
 
-DAW Sync lets Ableton Live users collaborate across macOS and Windows. Bitwig Studio and REAPER users can join the same room.
+DAW Sync lets Ableton Live users collaborate across macOS, Windows, and Linux. Bitwig Studio and REAPER users can join the same room.
 
 <a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a>
 
@@ -20,9 +20,9 @@ Mixer settings (volume, pan, sends, and effects) remain local to each participan
 
 ## Download
 
-[Download the Windows single-file executable (DawSync.exe)](https://github.com/7ewd/maltese/releases/download/v1.0/DawSync.exe) · [DAW Sync 1.0 release](https://github.com/7ewd/maltese/releases/tag/v1.0)
+[Windows executable](https://github.com/7ewd/maltese/releases/download/v1.0/DawSync.exe) · [Windows zip](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0 release](https://github.com/7ewd/maltese/releases/tag/v1.0)
 
-The Windows executable is self-contained; no .NET installation or additional runtime files are required. The app contains the Live, Bitwig, and REAPER integration files and installs them from the interface.
+All three builds are self-contained; no .NET installation or additional runtime files are required. The app contains the Live, Bitwig, and REAPER integration files and installs them from the interface.
 
 ## Usage
 
