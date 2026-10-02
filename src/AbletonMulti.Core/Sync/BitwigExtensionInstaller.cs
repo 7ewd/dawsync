@@ -24,20 +24,35 @@ public static class BitwigExtensionInstaller
     /// <summary>この PC に Bitwig Studio がありそうか（一度でも起動すると Documents/Bitwig Studio ができる）。</summary>
     public static bool IsBitwigPresent()
     {
-        if (Directory.Exists(BitwigUserDirectory)) return true;
-        if (OperatingSystem.IsWindows())
-            return Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Bitwig Studio"));
-        if (OperatingSystem.IsMacOS()) return Directory.Exists("/Applications/Bitwig Studio.app");
-        return false;
+        try
+        {
+            if (Directory.Exists(BitwigUserDirectory)) return true;
+            if (OperatingSystem.IsWindows())
+                return Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Bitwig Studio"));
+            if (OperatingSystem.IsMacOS()) return Directory.Exists("/Applications/Bitwig Studio.app");
+            return false;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;
+        }
     }
 
     public static ScriptInstallState GetState()
     {
-        var path = ExtensionPath;
-        if (!File.Exists(path)) return ScriptInstallState.NotInstalled;
-        var embedded = Embedded();
-        if (embedded is null) return ScriptInstallState.Installed;
-        return File.ReadAllBytes(path).AsSpan().SequenceEqual(embedded) ? ScriptInstallState.Installed : ScriptInstallState.Outdated;
+        try
+        {
+            var path = ExtensionPath;
+            if (!File.Exists(path)) return ScriptInstallState.NotInstalled;
+            var embedded = Embedded();
+            if (embedded is null) return ScriptInstallState.Installed;
+            return File.ReadAllBytes(path).AsSpan().SequenceEqual(embedded) ? ScriptInstallState.Installed : ScriptInstallState.Outdated;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            // 読めないときは入れ直してもらう（ボタンから入れ直せば直ることが多い）
+            return ScriptInstallState.Outdated;
+        }
     }
 
     /// <summary>拡張を入れる。Bitwig は Extensions フォルダを見張っているので、起動中でもすぐ読み込まれる。</summary>

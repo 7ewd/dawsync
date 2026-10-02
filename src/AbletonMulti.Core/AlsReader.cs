@@ -33,11 +33,35 @@ public static partial class AlsReader
         ["ExternalAudioEffect"] = "External Audio Effect",
     };
 
+    /// <summary>
+    /// .als の XML を読む。壊れたファイル・.als でないファイルは InvalidDataException（日本語の説明つき）にする。
+    /// ファイルが無い・読めないときの IOException / UnauthorizedAccessException はそのまま投げる。
+    /// </summary>
     public static XDocument LoadXml(string alsPath)
     {
         using var file = File.OpenRead(alsPath);
-        using var gzip = new GZipStream(file, CompressionMode.Decompress);
-        return XDocument.Load(gzip);
+        // 普通は gzip 圧縮されているが、圧縮していない XML のままのものも読めるようにする
+        var head = new byte[2];
+        var read = file.ReadAtLeast(head, 2, throwOnEndOfStream: false);
+        if (read == 0) throw new InvalidDataException("空のファイルです。");
+        file.Position = 0;
+        try
+        {
+            if (read == 2 && head[0] == 0x1F && head[1] == 0x8B)
+            {
+                using var gzip = new GZipStream(file, CompressionMode.Decompress);
+                return XDocument.Load(gzip);
+            }
+            return XDocument.Load(file);
+        }
+        catch (InvalidDataException e)
+        {
+            throw new InvalidDataException("圧縮された .als ファイルとして読めませんでした（壊れているか、.als ファイルではありません）。", e);
+        }
+        catch (System.Xml.XmlException e)
+        {
+            throw new InvalidDataException($"Ableton Live のセットファイルとして読めませんでした（中身が壊れているか、.als ファイルではありません。{e.LineNumber} 行目）。", e);
+        }
     }
 
     public static AlsProject Read(string alsPath)
@@ -260,13 +284,24 @@ public static partial class AlsReader
 
     private static bool IsUnder(string path, string dir)
     {
-        var d = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        return Path.GetFullPath(path).StartsWith(d, StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            var d = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return Path.GetFullPath(path).StartsWith(d, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            // .als に書かれたパスがこの OS では使えない形のとき
+            return false;
+        }
     }
 
     private static void ComputeDepths(List<TrackInfo> tracks)
     {
-        var byId = tracks.Where(t => t.Kind != TrackKind.Main).ToDictionary(t => t.Id);
+        // Id が重複・欠けている（-1）ファイルもあるので、最初の 1 つだけを使う
+        var byId = new Dictionary<int, TrackInfo>();
+        foreach (var t in tracks.Where(t => t.Kind != TrackKind.Main && t.Id >= 0))
+            byId.TryAdd(t.Id, t);
         foreach (var t in tracks)
         {
             var depth = 0;

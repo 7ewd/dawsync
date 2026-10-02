@@ -118,8 +118,12 @@ def tick():
         side.tick()
 
 
+# 遅延のある中継を通すとき（run_sim.sh の LATENCY_MS）は、届くまで長めに待つ
+TIMEOUT_SCALE = 1.0 + float(os.environ.get("LATENCY_MS") or 0) / 100.0
+
+
 def run_until(cond, timeout=4.0):
-    end = time.time() + timeout
+    end = time.time() + timeout * TIMEOUT_SCALE
     while time.time() < end:
         tick()
         if cond():
@@ -202,6 +206,24 @@ B.start()
 check("A と B がアプリに接続する", lambda: A.script._connected and B.script._connected, timeout=10)
 run_until(lambda: False, timeout=2.0)  # ルームへの初回同期を待つ
 
+# ============================================================== 同じ PC で別の DAW も開いている
+import json as _json
+import socket as _socket
+other = _socket.create_connection(("127.0.0.1", 47410), timeout=3)
+other.sendall((_json.dumps({"t": "hello", "proto": 2, "script": "bitwig-test", "live": "Bitwig Studio 6", "daw": "bitwig"}) + chr(10)).encode())
+reply = b""
+end_time = time.time() + 3
+while b"busy" not in reply and time.time() < end_time:
+    tick()
+    try:
+        other.settimeout(0.05)
+        reply += other.recv(4096)
+    except _socket.timeout:
+        pass
+other.close()
+check("先に Live がつながっていると、後から来た別の DAW は待たされる（取り合いにならない）",
+      lambda: b'"busy"' in reply and A.script._connected)
+
 # ============================================================== 基本
 A.song.tempo = 140.0
 check("テンポ", lambda: B.song.tempo == 140.0)
@@ -246,7 +268,8 @@ check("アレンジメントのノート",
       lambda: notes(A.song.tracks[0].arrangement_clips[0]) == notes(B.song.tracks[0].arrangement_clips[0]))
 
 # アレンジメントでクリップを動かす（重なっても切れ端が残らないこと）
-# B はそのクリップを開いて編集中（作り直されても開いたままになること）
+# B はそのクリップを開いて編集中（作り直されても開いたままになること）。B だけが持っている MPE もある
+B.song.tracks[0].arrangement_clips[0]._notes[0].mpe = "B のアレンジのピッチベンド"
 B.song.view.detail_clip = B.song.tracks[0].arrangement_clips[0]
 B.song.view.selected_track = B.song.tracks[0]
 arr_a = A.song.tracks[0].arrangement_clips[0]
@@ -259,10 +282,40 @@ def arrangement(side, index=0):
 
 check("アレンジメントのクリップを動かしても切れ端が残らない",
       lambda: arrangement(B) == arrangement(A) and len(arrangement(B)) == 1 and arrangement(B)[0][0] == 13.0)
+check("相手が動かしても、クリップの中の MPE（同期していない情報）は消えない",
+      lambda: any(n.mpe == "B のアレンジのピッチベンド" for n in B.song.tracks[0].arrangement_clips[0]._notes))
 
 arr_a = A.song.tracks[0].arrangement_clips[0]
 arr_a.end_time = 25.0
 check("アレンジメントのクリップの右端を伸ばす", lambda: arrangement(B) == arrangement(A) == [(13.0, 25.0, arrangement(A)[0][2])])
+
+
+def edges(side, index=0):
+    return [(c.start_time, c.end_time, c.start_marker, c.looping, c.loop_start, c.loop_end, sorted(notes(c)))
+            for c in side.song.tracks[index].arrangement_clips]
+
+
+# 左端を動かす（位置と中身の開始位置が一緒にずれ、右端はそのまま）
+arr_a = A.song.tracks[0].arrangement_clips[0]
+arr_a.start_time, arr_a.start_marker = 14.0, arr_a.start_marker + 1.0
+check("アレンジメントのクリップの左端を動かす", lambda: edges(B) == edges(A) and edges(B)[0][:2] == (14.0, 25.0))
+arr_b = B.song.tracks[0].arrangement_clips[0]
+arr_b.start_time, arr_b.start_marker = 13.0, arr_b.start_marker - 1.0
+check("左端を戻す（逆向き）", lambda: edges(A) == edges(B) and edges(A)[0][:2] == (13.0, 25.0))
+arr_a = A.song.tracks[0].arrangement_clips[0]
+arr_a.loop_start, arr_a.loop_end = 1.0, 3.0
+check("アレンジメントのクリップのループ範囲", lambda: edges(B) == edges(A) and edges(B)[0][4:6] == (1.0, 3.0))
+arr_b = B.song.tracks[0].arrangement_clips[0]
+arr_b.looping = False
+check("アレンジメントのクリップのループを切る", lambda: edges(A) == edges(B) and edges(A)[0][3] is False)
+arr_a = A.song.tracks[0].arrangement_clips[0]
+arr_a.looping = True
+check("アレンジメントのクリップのループを入れる", lambda: edges(A) == edges(B) and edges(B)[0][3] is True)
+arr_a = A.song.tracks[0].arrangement_clips[0]
+A.song.tracks[0].user_split(arr_a, arr_a.start_time + 4.0)
+check("アレンジメントのクリップを分割する", lambda: edges(B) == edges(A) and len(edges(B)) == 2 and edges(B)[1][0] == 17.0)
+B.song.tracks[0].delete_clip(B.song.tracks[0].arrangement_clips[1])
+check("分割した後ろを消す", lambda: edges(A) == edges(B) and len(edges(A)) == 1)
 # 同じクリップを 2 人が同時に編集する（届く前にお互い編集する）
 clip_a, clip_b = A.song.tracks[0].arrangement_clips[0], B.song.tracks[0].arrangement_clips[0]
 clip_a.user_add_note(70, 1.0)

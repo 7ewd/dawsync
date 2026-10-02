@@ -34,8 +34,29 @@ switch (args[0])
         }
         return 0;
     default:
-        return await CheckAsync();
+        try
+        {
+            return await CheckAsync();
+        }
+        catch (Exception e)
+        {
+            // 壊れた .als などでも、スタックトレースではなく短い説明を出す
+            Console.Error.WriteLine($"チェックできませんでした: {DescribeCheckError(e)}");
+            return 2;
+        }
 }
+
+string DescribeCheckError(Exception e) => e switch
+{
+    FileNotFoundException f => $"ファイルが見つかりません（{f.FileName ?? args[0]}）",
+    DirectoryNotFoundException => $"フォルダが見つかりません（{args[0]}）",
+    UnauthorizedAccessException => "ファイルを読み書きする権限がありません",
+    InvalidDataException => e.Message,
+    System.Xml.XmlException => "Ableton Live のセットファイルとして読めませんでした（中身が壊れているか、.als ファイルではありません）",
+    IOException => $"ファイルを読み書きできませんでした（ほかのアプリが使っていないか確認してください）: {e.Message}",
+    ArgumentException or NotSupportedException => $"ファイルの場所の形が正しくありません（{args[0]}）",
+    _ => $"思わぬエラーが起きました: {e.Message}",
+};
 
 async Task<int> RunSessionAsync()
 {

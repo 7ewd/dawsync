@@ -3,23 +3,36 @@
 -- REAPER の中で動き、同じ PC の AbletonMulti アプリとやりとりする。やりとりの中身は Live の Remote Script
 -- （multi.py）とまったく同じなので、アプリからは Live と同じに見える。
 -- REAPER の Lua には通信の機能が無いので、ファイルでやりとりする（アプリ側の ReaperRelay が TCP に中継する）:
---   <REAPER の設定フォルダ>/AbletonMulti/ipc/<ポート>/in/   アプリ → REAPER（1 行 1 JSON のファイル）
+--   <AppData>/AbletonMulti/reaper-ipc/<ポート>/in/   アプリ → REAPER（1 行 1 JSON のファイル）
 --                                                    out/  REAPER → アプリ
 --                                                    reaper_alive  REAPER が動いている印（時刻）
 --                                                    app_alive     アプリがつながっている印（時刻 と 接続ごとの番号）
 -- REAPER の起動時に Scripts/__startup.lua から読み込まれる（アプリの「REAPER にスクリプトを入れる」で設定される）。
 
-local VERSION = "0.1.0"
+local VERSION = "0.3.1"
 local PROTOCOL = 2
 local APP_PORT = 47400
+-- アプリの印（app_alive）がこれだけ古くなったら切れたとみなす。大きなプロジェクトでは REAPER の画面の処理が
+-- しばらく止まることがあるので、余裕を持たせる（アプリ側の ReaperRelay も同じ長さ）
+local ALIVE_TIMEOUT = 10
 
+-- __startup.lua から動くと、Lua の状態を他のスクリプトと共有する。require だと同じ名前（json など）の
+-- 別のモジュールと取り違えるので、このファイルの隣のファイルを直接読み込む
 local script_dir = debug.getinfo(1, "S").source:match("^@(.*[\\/])") or ""
-package.path = script_dir .. "?.lua;" .. package.path
-local json = require("json")
-local Model = require("model")
+local json = dofile(script_dir .. "json.lua")
+-- model.lua には同じ json を渡す（json.null や配列の印は、同じ json でないと通じない）
+local Model = assert(loadfile(script_dir .. "model.lua"))(json)
 
-local resource = reaper.GetResourcePath()
-local root = resource .. "/AbletonMulti/ipc"
+-- やりとりの場所は REAPER の設定フォルダではなく、アプリと決めた固定の場所（ポータブル版の REAPER でも見つかるように）
+local function ipc_root()
+  local os_name = reaper.GetOS()
+  if os_name:match("^Win") then return (os.getenv("APPDATA") or "") .. "/AbletonMulti/reaper-ipc" end
+  if os_name:match("OSX") or os_name:match("macOS") then
+    return (os.getenv("HOME") or "") .. "/Library/Application Support/AbletonMulti/reaper-ipc"
+  end
+  return (os.getenv("HOME") or "") .. "/.config/AbletonMulti/reaper-ipc"
+end
+local root = ipc_root()
 
 local function read_file(path)
   local f = io.open(path, "rb")
@@ -49,8 +62,14 @@ local function log(message)
 end
 
 -- つなぐ先のポート。テスト用に、ipc/debug と ipc/port（"ポート 期限のミリ秒"）があれば期限までそちらを使う
+-- テストで REAPER を起動するときだけ、環境変数と印のファイルの両方で有効にする
+-- （普段の REAPER で、ほかのプログラムが一時フォルダにファイルを置くだけで REAPER を操作できないように）
+local function debug_enabled()
+  return os.getenv("ABLETONMULTI_DEBUG") == "1" and read_file(root .. "/debug") ~= nil
+end
+
 local function app_port()
-  if read_file(root .. "/debug") then
+  if debug_enabled() then
     local text = read_file(root .. "/port")
     if text then
       local port, expiry = text:match("(%d+)%s+(%d+)")
@@ -64,7 +83,7 @@ end
 
 local port, base, in_dir, out_dir
 local model
-local project
+local project, project_path
 local connected, app_session = false, nil
 local app_seen = 0           -- 最後にアプリの印を読めた時刻（ファイルは置き直されるので、一瞬読めないことがある）
 local pending = {}          -- key -> { 変えた項目の集合, ... }
@@ -74,8 +93,10 @@ local dirty = true
 local last_count = -1
 local last_check, last_heartbeat, last_alive_check = 0, 0, 0
 local debug_mode = false
--- 新しいスクリプトを入れたとき、動いている古いものを止める印（ipc/reload の中身が変わったら止まる）
-local reload_token = read_file(root .. "/reload")
+-- 同時に 2 つ以上動かさない: 起動するたびに REAPER の共有メモリ（ExtState）に自分の印を書き、
+-- 自分より新しい印に変わっていたら止まる（__startup.lua から動いているときにアクションから実行した、
+-- 新しいスクリプトを入れて動かし直した、など）
+local instance = string.format("%.6f-%d", reaper.time_precise(), math.random(1, 1 << 30))
 
 local function send(msg)
   outgoing[#outgoing + 1] = json.encode(msg)
@@ -113,8 +134,15 @@ local function setup_dirs()
   end
 end
 
+-- 今のプロジェクト（タブ）とそのファイル。同じタブで別の .rpp を開いた・新規にしたときは、ReaProject* が
+-- 変わらないことがあるので、ファイルの場所でも見分ける
+local function current_project()
+  local proj, path = reaper.EnumProjects(-1, "")
+  return proj, path or ""
+end
+
 local function attach()
-  project = reaper.EnumProjects(-1)
+  project, project_path = current_project()
   model = Model.new(log, warn)
   pending = {}
   dirty = true
@@ -136,7 +164,8 @@ local function flush_local(force)
   if not connected then return end
   local now = reaper.time_precise()
   local count = reaper.GetProjectStateChangeCount(0)
-  if not force and count == last_count and now - last_check < 1.0 then return end
+  -- 変更の番号が変わったときだけ読み直す（念のため 5 秒に 1 回は見る）
+  if not force and count == last_count and now - last_check < 5.0 then return end
   if not force and now - last_check < 0.1 then return end
   last_count, last_check = count, now
   local ops = model:collect_changes()
@@ -181,6 +210,9 @@ local function handle(msg)
       if waiting and #waiting > 0 then table.remove(waiting, 1) end
       if waiting and #waiting == 0 then pending[key] = nil end
     end
+  elseif kind == "busy" then
+    -- 同じ PC で別の DAW が先にアプリにつながっている（アプリ側の中継が 2 秒ごとにつなぎ直す）
+    log("waiting: another DAW (" .. tostring(msg.daw) .. ") is connected to the app")
   elseif kind == "reset" then
     pending = {}
   elseif kind == "snapshot_req" then
@@ -211,8 +243,10 @@ local function read_inbox()
   for _, name in ipairs(names) do
     local path = in_dir .. "/" .. name
     local text = read_file(path)
-    os.remove(path)
-    if text and connected then
+    -- 消せたものだけ扱う（消せないまま扱うと次の回にもう一度扱ってしまい、ack が 2 回効くなどする）。
+    -- 順番を崩さないよう、読めない・消せないものがあったら、そこから先は次の回に
+    if not text or not os.remove(path) then break end
+    if connected then
       for line in text:gmatch("[^\n]+") do
         local ok, msg = pcall(json.decode, line)
         if ok and type(msg) == "table" then
@@ -241,20 +275,21 @@ local function tick()
   local now = reaper.time_precise()
   if now - last_heartbeat >= 1.0 then
     last_heartbeat = now
-    debug_mode = read_file(root .. "/debug") ~= nil
+    debug_mode = debug_enabled()
     if app_port() ~= port then
       setup_dirs()
       connected = false
     end
     write_file(base .. "/reaper_alive", tostring(os.time()))
-    if read_file(root .. "/reload") ~= reload_token then
-      log("stopped (a newer script was started)")
-      return  -- defer しない = このスクリプトは終わる
-    end
+  end
+  if reaper.GetExtState("AbletonMulti", "instance") ~= instance then
+    log("stopped (a newer script was started)")
+    return  -- defer しない = このスクリプトは終わる
   end
 
-  -- 別のプロジェクト（タブ）に切り替わった
-  if reaper.EnumProjects(-1) ~= project then
+  -- 別のプロジェクト（タブ）に切り替わった、または同じタブで別のファイルを開いた・新規にした
+  local proj, path = current_project()
+  if proj ~= project or path ~= project_path then
     attach()
     if connected then send_hello() end
   end
@@ -263,8 +298,8 @@ local function tick()
     last_alive_check = now
     local text = read_file(base .. "/app_alive") or ""
     local t, session = text:match("(%d+)%s+(%S+)")
-    if t ~= nil and os.time() - tonumber(t) <= 3 then app_seen = now end
-    local alive = now - app_seen <= 3
+    if t ~= nil and os.time() - tonumber(t) <= ALIVE_TIMEOUT then app_seen = now end
+    local alive = now - app_seen <= ALIVE_TIMEOUT
     if alive and session and (not connected or session ~= app_session) then
       connected, app_session = true, session
       pending = {}
@@ -289,6 +324,7 @@ local function tick()
 end
 
 math.randomseed(os.time())
+reaper.SetExtState("AbletonMulti", "instance", instance, false)
 setup_dirs()
 attach()
 log("AbletonMulti for REAPER " .. VERSION .. " loaded (port " .. port .. ")")

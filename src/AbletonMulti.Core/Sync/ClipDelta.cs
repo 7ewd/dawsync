@@ -11,8 +11,20 @@ namespace AbletonMulti.Core.Sync;
 public static class ClipDelta
 {
     /// <summary>今の値 existing に incoming を反映した値（delta が無ければ incoming そのもの）。</summary>
+    /// <remarks>
+    /// 無いクリップへの delta（相手が消した・動かしたのと同時に、中身を編集していた）は反映しない（null を返す）。
+    /// 反映すると、消した・動かしたはずのクリップが元の位置に戻ってきて、動かした先と 2 つになってしまう。
+    /// Live・Bitwig の拡張も同じ規則で無視するので、全員が同じ結果になる。
+    /// </remarks>
     public static JsonNode? Apply(JsonNode? existing, JsonNode? incoming)
     {
+        if (existing is null && incoming is JsonObject patch && patch["delta"] is JsonObject)
+            return null;
+        // 種類（MIDI / オーディオ）が変わったクリップへの編集も反映しない（相手が作り直す前のクリップへの編集。
+        // ノート全部（n）を付けずに送ってくるので、これで作り直すと空のクリップになってしまう）
+        if (existing is JsonObject kept && incoming is JsonObject edit && edit["delta"] is JsonObject
+            && (string?)kept["k"] != (string?)edit["k"])
+            return kept;
         if (incoming is not JsonObject value || value["delta"] is not JsonObject delta || existing is not JsonObject current
             || (string?)current["k"] != (string?)value["k"])
             return Strip(incoming);
@@ -41,6 +53,20 @@ public static class ClipDelta
         return result;
     }
 
+    /// <summary>
+    /// 送るときは、ノートの変更（delta の a / d）があれば、ノート全部（n）は付けない。受け取る側は今のクリップに
+    /// a / d を重ねるだけなので要らず、ノートの多いクリップをドラッグで編集すると、毎回全部送って回線が詰まるため。
+    /// </summary>
+    public static JsonNode? WithoutNotes(JsonNode? value)
+    {
+        if (value is not JsonObject o || o["delta"] is not JsonObject delta || !o.ContainsKey("n")
+            || !(delta.ContainsKey("a") || delta.ContainsKey("d")))
+            return value;
+        var copy = (JsonObject)o.DeepClone();
+        copy.Remove("n");
+        return copy;
+    }
+
     private static JsonNode? Strip(JsonNode? value)
     {
         if (value is not JsonObject o || !o.ContainsKey("delta")) return value;
@@ -53,25 +79,32 @@ public static class ClipDelta
 
     private static double[] FullRow(JsonNode? row)
     {
-        var values = (row as JsonArray ?? []).Select(v => v is null ? 0 : v.GetValue<double>()).ToList();
-        while (values.Count < Defaults.Length) values.Add(Defaults[values.Count]);
-        return values.ToArray();
+        var items = (row as JsonArray ?? []).ToList();
+        var values = new double[Math.Max(items.Count, Defaults.Length)];
+        for (var i = 0; i < values.Length; i++)
+            values[i] = i < items.Count && items[i] is JsonValue v && v.TryGetValue<double>(out var d) ? d
+                : i < Defaults.Length ? Defaults[i] : 0;
+        return values;
     }
 
-    private static (int, double, double) Ident(double[] row) =>
-        ((int)row[0], Math.Round(row[1], 5), Math.Round(row[2], 5));
+    // 同じノートか。REAPER は 1 拍 960 の目盛りに丸めるので、その 1 目盛りくらいの差は同じとみなす
+    // （Live・Bitwig・REAPER のスクリプトと同じ規則。違うと、ルームの状態にだけ消えないノートが残る）
+    private const double NoteTolerance = 0.002;
+
+    private static bool SameNote(double[] a, double[] b) =>
+        (int)a[0] == (int)b[0] && Math.Abs(a[1] - b[1]) <= NoteTolerance && Math.Abs(a[2] - b[2]) <= NoteTolerance;
 
     private static JsonArray ApplyRows(JsonArray? rows, JsonArray? added, JsonArray? removed)
     {
         var result = (rows ?? []).Select(FullRow).ToList();
         foreach (var r in (removed ?? []).Select(FullRow))
         {
-            var i = result.FindIndex(x => Ident(x) == Ident(r));
+            var i = result.FindIndex(x => SameNote(x, r));
             if (i >= 0) result.RemoveAt(i);
         }
         foreach (var r in (added ?? []).Select(FullRow))
         {
-            result.RemoveAll(x => Ident(x) == Ident(r));
+            result.RemoveAll(x => SameNote(x, r));
             result.Add(r);
         }
         result.Sort((a, b) =>

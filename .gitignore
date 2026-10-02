@@ -11,3 +11,4 @@ tests/bitwig/logs/
 __pycache__/
 *.pyc
 tests/reaper/logs/
+tests/live/logs/

@@ -1,11 +1,14 @@
 package com.abletonmulti.bitwig;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Bitwig の内部（公開 API に無いもの）を呼ぶところ。名前は難読化されているので、Bitwig のバージョンが
@@ -125,30 +128,76 @@ final class Internals {
     double readTranspose(Object noteApi) {
         try {
             Object note = target(noteApi);
-            Object exprs = find(note.getClass(), "A1o", 0).invoke(note);
-            Object kind = cl.loadClass("N2l").getField("Xzy").get(null);
-            Object lane = exprs.getClass().getMethod("Xzy", kind.getClass(), boolean.class).invoke(exprs, kind, false);
+            Method exprsOf = cached(EXPRS, note.getClass(), k -> Optional.of(find(k, "A1o", 0))).orElse(null);
+            if (exprsOf == null) return 0;
+            Object exprs = exprsOf.invoke(note);
+            Object kind = transposeKind();
+            Method laneOf = cached(LANE, exprs.getClass(), k -> Optional.of(k.getMethod("Xzy", kind.getClass(), boolean.class))).orElse(null);
+            if (laneOf == null) return 0;
+            Object lane = laneOf.invoke(exprs, kind, false);
             if (lane == null) return 0;
-            Method points = null;
-            for (Class<?> k = lane.getClass(); k != null && points == null; k = k.getSuperclass())
-                if (k.getSimpleName().equals("gCK"))
-                    for (Method m : k.getDeclaredMethods())
-                        if (m.getName().equals("r3B") && m.getParameterCount() == 0 && List.class.isAssignableFrom(m.getReturnType())) points = m;
-            if (points == null) return 0;
-            points.setAccessible(true);
-            List<?> list = (List<?>) points.invoke(lane);
+            Optional<Method> points = cached(POINTS, lane.getClass(), c -> {
+                for (Class<?> k = c; k != null; k = k.getSuperclass())
+                    if (k.getSimpleName().equals("gCK"))
+                        for (Method m : k.getDeclaredMethods())
+                            if (m.getName().equals("r3B") && m.getParameterCount() == 0 && List.class.isAssignableFrom(m.getReturnType())) {
+                                m.setAccessible(true);
+                                return Optional.of(m);
+                            }
+                return Optional.empty();
+            });
+            if (points.isEmpty()) return 0;
+            List<?> list = (List<?>) points.get().invoke(lane);
             if (list == null || list.isEmpty()) return 0;
             Object point = list.get(0);
-            for (Class<?> k = point.getClass(); k != null; k = k.getSuperclass())
-                if (k.getSimpleName().equals("jYK")) {
-                    var f = k.getDeclaredField("Xzy");
-                    f.setAccessible(true);
-                    return ((Number) f.get(point)).doubleValue();
-                }
+            Optional<Field> value = cached(VALUE, point.getClass(), c -> {
+                for (Class<?> k = c; k != null; k = k.getSuperclass())
+                    if (k.getSimpleName().equals("jYK")) {
+                        Field f = k.getDeclaredField("Xzy");
+                        f.setAccessible(true);
+                        return Optional.of(f);
+                    }
+                return Optional.empty();
+            });
+            if (value.isPresent()) return ((Number) value.get().get(point)).doubleValue();
         } catch (ReflectiveOperationException | RuntimeException e) {
             return 0;
         }
         return 0;
+    }
+
+    // readTranspose で使う内部のメソッドなど。オーディオクリップごとに読むたびに探すと重いので、クラスごとに覚えておく
+    private static final Map<Class<?>, Optional<Method>> EXPRS = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Optional<Method>> LANE = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Optional<Method>> POINTS = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Optional<Field>> VALUE = new ConcurrentHashMap<>();
+    private static volatile Object[] sKind;  // {クラスローダー, N2l.Xzy}
+
+    private interface Lookup<T> {
+        Optional<T> find(Class<?> k) throws ReflectiveOperationException;
+    }
+
+    /** 見つからなかったことも覚えておく（毎回探し直さないように）。 */
+    private static <T> Optional<T> cached(Map<Class<?>, Optional<T>> cache, Class<?> k, Lookup<T> lookup) {
+        Optional<T> v = cache.get(k);
+        if (v == null) {
+            try {
+                v = lookup.find(k);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                v = Optional.empty();
+            }
+            cache.put(k, v);
+        }
+        return v;
+    }
+
+    /** トランスポーズのエクスプレッションの種類（N2l.Xzy）。 */
+    private Object transposeKind() throws ReflectiveOperationException {
+        Object[] cache = sKind;
+        if (cache != null && cache[0] == cl) return cache[1];
+        Object kind = cl.loadClass("N2l").getField("Xzy").get(null);
+        sKind = new Object[] { cl, kind };
+        return kind;
     }
 
     void insertTrack(Object group, Object track, int index) throws ReflectiveOperationException {
@@ -183,10 +232,23 @@ final class Internals {
                 };
             }
             onChange.run();
-            return null;
+            return defaultValue(m.getReturnType());
         });
         call(addListener, internal, proxy);
         return proxy;
+    }
+
+    /** 戻り値の型に合った「何もしない」値（プリミティブ型に null を返すと、呼んだ側で例外になる）。 */
+    private static Object defaultValue(Class<?> type) {
+        if (!type.isPrimitive() || type == void.class) return null;
+        if (type == boolean.class) return false;
+        if (type == char.class) return ' ';
+        if (type == byte.class) return (byte) 0;
+        if (type == short.class) return (short) 0;
+        if (type == int.class) return 0;
+        if (type == long.class) return 0L;
+        if (type == float.class) return 0f;
+        return 0.0;
     }
 
     void unlisten(Object internal, Object proxy) {

@@ -44,6 +44,15 @@ public sealed class LiveBridge : IAsyncDisposable
     public event Action<JsonObject>? ApiReported;
     public int Port { get; private set; }
 
+    /// <summary>
+    /// 先に別の DAW がつながっていたので待ってもらっている DAW の名前（最後に来てから 10 秒たったら null）。
+    /// 同じ PC で Live と REAPER などを両方開いていても、取り合いにならないようにするため。
+    /// </summary>
+    public string? WaitingDaw => DateTime.UtcNow - _waitingSince < TimeSpan.FromSeconds(10) ? _waitingDaw : null;
+    private string? _waitingDaw;
+    private DateTime _waitingSince = DateTime.MinValue;
+    public event Action? WaitingChanged;
+
     public void Start(int port = DefaultPort)
     {
         Port = port;
@@ -141,39 +150,61 @@ public sealed class LiveBridge : IAsyncDisposable
         var helloReceived = false;
         await foreach (var msg in connection.ReadAllAsync(_cts.Token))
         {
-            switch ((string?)msg["t"])
+            try
             {
-                case "hello":
-                    // Live はセットを開き直すたびにスクリプトを作り直すので、新しい接続が来たら古い方は捨てる
-                    var old = Interlocked.Exchange(ref _connection, connection);
-                    if (old is not null && old != connection) await old.DisposeAsync();
-                    LiveVersion = (string?)msg["live"];
-                    Daw = (string?)msg["daw"] ?? "live";
-                    ScriptVersion = (string?)msg["script"];
-                    ScriptProtocolVersion = (int?)msg["proto"] ?? 1;
-                    helloReceived = true;
-                    Connected?.Invoke(DawName);
-                    break;
-                case "ops" when helloReceived:
-                    LocalOps?.Invoke(Op.FromArray(msg["ops"]));
-                    break;
-                case "snapshot" when helloReceived:
-                    TaskCompletionSource<List<Op>>? tcs;
-                    lock (_gate) _snapshotRequests.TryGetValue((int?)msg["id"] ?? -1, out tcs);
-                    tcs?.TrySetResult(Op.FromArray(msg["ops"]));
-                    break;
-                case "adopted" or "blanked" when helloReceived:
-                    TaskCompletionSource? adopted;
-                    lock (_gate) _adoptRequests.TryGetValue((int?)msg["id"] ?? -1, out adopted);
-                    adopted?.TrySetResult();
-                    break;
-                case "api" when helloReceived:
-                    ApiReport = msg["info"] as JsonObject;
-                    if (ApiReport is not null) ApiReported?.Invoke(ApiReport);
-                    break;
-                case "warn" when helloReceived:
-                    Warning?.Invoke((string?)msg["msg"] ?? "");
-                    break;
+                switch ((string?)msg["t"])
+                {
+                    case "hello":
+                        var daw = (string?)msg["daw"] ?? "live";
+                        if (_connection is { } current && current != connection && daw != Daw)
+                        {
+                            // 別の DAW がもうつながっている。先の方を使い続け、後から来た方には待ってもらう
+                            // （DAW 側は 2 秒ごとにつなぎ直してくるので、先の方が終われば自然に代わる）
+                            var waiting = _waitingDaw;
+                            _waitingDaw = (string?)msg["live"] ?? daw;
+                            _waitingSince = DateTime.UtcNow;
+                            if (waiting != _waitingDaw) WaitingChanged?.Invoke();
+                            connection.Send(new JsonObject { ["t"] = "busy", ["daw"] = DawName });
+                            await Task.Delay(200);
+                            await connection.DisposeAsync();
+                            return;
+                        }
+                        // 同じ DAW（Live はセットを開き直すたびにスクリプトを作り直す）なら、新しい接続が来たら古い方は捨てる
+                        var old = Interlocked.Exchange(ref _connection, connection);
+                        if (old is not null && old != connection) await old.DisposeAsync();
+                        LiveVersion = (string?)msg["live"];
+                        Daw = (string?)msg["daw"] ?? "live";
+                        ScriptVersion = (string?)msg["script"];
+                        ScriptProtocolVersion = (int?)msg["proto"] ?? 1;
+                        helloReceived = true;
+                        Connected?.Invoke(DawName);
+                        break;
+                    case "ops" when helloReceived:
+                        LocalOps?.Invoke(Op.FromArray(msg["ops"]));
+                        break;
+                    case "snapshot" when helloReceived:
+                        TaskCompletionSource<List<Op>>? tcs;
+                        lock (_gate) _snapshotRequests.TryGetValue((int?)msg["id"] ?? -1, out tcs);
+                        tcs?.TrySetResult(Op.FromArray(msg["ops"]));
+                        break;
+                    case "adopted" or "blanked" when helloReceived:
+                        TaskCompletionSource? adopted;
+                        lock (_gate) _adoptRequests.TryGetValue((int?)msg["id"] ?? -1, out adopted);
+                        adopted?.TrySetResult();
+                        break;
+                    case "api" when helloReceived:
+                        ApiReport = msg["info"] as JsonObject;
+                        if (ApiReport is not null) ApiReported?.Invoke(ApiReport);
+                        break;
+                    case "warn" when helloReceived:
+                        Warning?.Invoke((string?)msg["msg"] ?? "");
+                        break;
+                }
+            }
+            catch (Exception e) when (e is not OutOfMemoryException and not OperationCanceledException)
+            {
+                // 1 つのメッセージの処理の失敗で、DAW との接続を止めない（止まると、つながったまま何も届かなくなる）
+                Warning?.Invoke($"DAW からのメッセージを処理できませんでした: {e.Message}");
             }
         }
 

@@ -85,7 +85,8 @@ def run_until(cond, timeout):
 
 
 def check(name, cond, timeout=6.0):
-    ok = run_until(cond, timeout)
+    # 遅延のある中継を通すときは、届くまで長めに待つ
+    ok = run_until(cond, timeout * (1.0 + float(os.environ.get("LATENCY_MS") or 0) / 100.0))
     results.append((name, ok))
     print(("PASS " if ok else "FAIL ") + name, flush=True)
     return ok
@@ -134,6 +135,14 @@ def same_clips(track):
     return [(s, d, n) for s, d, n, _ in bw_clips(track.name)] == [(s, d, n) for s, d, n, _ in live_clips(track)]
 
 
+def bw_props(name, index=0):
+    """Bitwig のクリップ（トラックの index 番目）の p（ループ・開始位置など）"""
+    s = bw()
+    tid = bw_id(name)
+    keys = sorted((float(k.split("/")[3]), k) for k, v in s.items() if k.startswith("c/a/%s/" % tid) and v)
+    return s[keys[index][1]]["p"]
+
+
 def names():
     return [t.name for t in song.tracks]
 
@@ -153,9 +162,18 @@ def main():
         print(build.stdout[-3000:])
         sys.exit(1)
 
+    def env(name):
+        # TRACE=1 で、アプリがやりとりした変更をそのまま logs/trace_<名前>.jsonl に書き出す（調査用）
+        if os.environ.get("TRACE") != "1":
+            return None
+        path = os.path.join(LOGS, "trace_%s.jsonl" % name)
+        if os.path.exists(path):
+            os.remove(path)
+        return dict(os.environ, ABLETONMULTI_TRACE=path)
+
     host = subprocess.Popen([CLI, "session", "--host", "--name", "Live", "--bridge-port", "47410", "--port", "47411",
                              "--key", "BWTEST", "--samples", os.path.join(LOGS, "samples_live")],
-                            stdout=open(os.path.join(LOGS, "app_live.txt"), "w"), stderr=subprocess.STDOUT)
+                            stdout=open(os.path.join(LOGS, "app_live.txt"), "w"), stderr=subprocess.STDOUT, env=env("live"))
     procs = [host]
     log_start = os.path.getsize(BW_LOG) if os.path.exists(BW_LOG) else 0
     try:
@@ -165,10 +183,17 @@ def main():
         # Bitwig の拡張をテスト用のポートにつながせる（47400 だと本物の Live の Remote Script もつないでくるので）
         with open(PORT_FILE, "w") as f:
             f.write("%d %d" % (BITWIG_TEST_PORT, int((time.time() + 3600) * 1000)))
-        bitwig = subprocess.Popen([CLI, "session", "--join", "127.0.0.1:47411", "--key", "BWTEST", "--name", "Bitwig",
+        room = "127.0.0.1:47411"
+        if os.environ.get("LATENCY_MS"):
+            # Wi-Fi・インターネット越しのような遅延のある中継を通してつなぐ
+            procs.append(subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "sim", "latency_proxy.py"), "47412", "47411",
+                                           os.environ["LATENCY_MS"], os.environ.get("JITTER_MS", "0")]))
+            room = "127.0.0.1:47412"
+            time.sleep(0.5)
+        bitwig = subprocess.Popen([CLI, "session", "--join", room, "--key", "BWTEST", "--name", "Bitwig",
                                    "--bridge-port", str(BITWIG_TEST_PORT),
                                    "--samples", os.path.join(LOGS, "samples_bitwig"), "--blank"],
-                                  stdout=open(os.path.join(LOGS, "app_bitwig.txt"), "w"), stderr=subprocess.STDOUT)
+                                  stdout=open(os.path.join(LOGS, "app_bitwig.txt"), "w"), stderr=subprocess.STDOUT, env=env("bitwig"))
         procs.append(bitwig)
         run_tests()
         if "--watch" in sys.argv:
@@ -220,6 +245,29 @@ def run_tests():
     clip.end_time = 24.0
     check("クリップの長さを変える", lambda: bw_clips("Bass")[0][1] == 12.0)
 
+    # 左端を動かす（位置と中身の開始位置が一緒にずれ、右端はそのまま）
+    clip = song.tracks[0].arrangement_clips[0]
+    clip.start_time, clip.start_marker = clip.start_time + 1.0, clip.start_marker + 1.0
+    check("Live でクリップの左端を動かす → Bitwig",
+          lambda: [(c[0], c[1]) for c in bw_clips("Bass")] == [(13.0, 11.0)] and bw_props("Bass")["sm"] == clip.start_marker
+          and same_clips(song.tracks[0]))
+    clip = song.tracks[0].arrangement_clips[0]
+    clip.looping, clip.loop_start, clip.loop_end = True, 1.0, 5.0
+    check("Live でループの範囲を変える → Bitwig",
+          lambda: bw_props("Bass")["looping"] is True and (bw_props("Bass")["ls"], bw_props("Bass")["le"]) == (1.0, 5.0)
+          and bw_clips("Bass")[0][1] == 11.0)
+    clip = song.tracks[0].arrangement_clips[0]
+    clip.looping = False
+    clip.start_marker, clip.end_marker = 1.0, 12.0
+    check("Live でループを切る → Bitwig", lambda: bw_props("Bass")["looping"] is False and same_clips(song.tracks[0]))
+    clip = song.tracks[0].arrangement_clips[0]
+    song.tracks[0].user_split(clip, clip.start_time + 4.0)
+    check("Live でクリップを分割する → Bitwig",
+          lambda: same_clips(song.tracks[0]) and len(bw_clips("Bass")) == 2
+          and bw_props("Bass", 1)["sm"] == song.tracks[0].arrangement_clips[1].start_marker)
+    song.tracks[0].delete_clip(song.tracks[0].arrangement_clips[1])
+    check("分割した後ろを消す → Bitwig", lambda: same_clips(song.tracks[0]) and len(bw_clips("Bass")) == 1)
+
     new = song.tracks[1].create_midi_clip(16.0, 4.0)
     new.name = "Stab"
     new.user_add_note(72, 0.0)
@@ -265,8 +313,29 @@ def run_tests():
     bw_cmd("clip-move Bass %g 20" % start)
     check("Bitwig でクリップを動かす → Live（切れ端なし）",
           lambda: [(c.start_time, c.end_time) for c in bass.arrangement_clips] == [(20.0, 36.0)] and same_clips(bass))
+    bw_cmd("clip-trim Bass 20 22")
+    check("Bitwig でクリップの左端を動かす → Live",
+          lambda: [(c.start_time, c.end_time) for c in bass.arrangement_clips] == [(22.0, 36.0)]
+          and bass.arrangement_clips[0].start_marker == bw_props("Bass")["sm"] and same_clips(bass))
+    bw_cmd("clip-loop Bass 22 on 0 4")
+    check("Bitwig でループを入れる → Live",
+          lambda: bass.arrangement_clips[0].looping and (bass.arrangement_clips[0].loop_start, bass.arrangement_clips[0].loop_end) == (0.0, 4.0)
+          and [(c.start_time, c.end_time) for c in bass.arrangement_clips] == [(22.0, 36.0)])
+    bw_cmd("clip-loop Bass 22 off")
+    check("Bitwig でループを切る → Live", lambda: not bass.arrangement_clips[0].looping and same_clips(bass))
+    bw_cmd("clip-move Bass 22 20")
+    check("Bitwig で左端を動かしたクリップを動かす → Live",
+          lambda: [c.start_time for c in bass.arrangement_clips] == [20.0] and same_clips(bass))
     bw_cmd("clip-note Bass 20 55 1 0.5")
     check("Bitwig でノートを足す → Live", lambda: (55, 1.0, 0.5) in live_clips(bass)[0][2])
+    bw_cmd("clip-split Bass 20 24")
+    check("Bitwig でクリップを分割する → Live",
+          lambda: [(c.start_time, c.end_time) for c in bass.arrangement_clips] == [(20.0, 24.0), (24.0, 34.0)]
+          and bass.arrangement_clips[1].start_marker == bw_props("Bass", 1)["sm"] and same_clips(bass))
+    bass.delete_clip(bass.arrangement_clips[1])
+    check("分割した後ろを消す → Bitwig", lambda: same_clips(bass) and len(bw_clips("Bass")) == 1)
+    bw_cmd("clip-dur Bass 20 14")
+    check("分割した前を元の長さに戻す", lambda: [(c.start_time, c.end_time) for c in bass.arrangement_clips] == [(20.0, 34.0)])
 
     # 同じクリップに、同時に別々のノートを足しても両方残る（相手の古い値で消されない）
     bass.arrangement_clips[0].user_add_note(62, 3.0)
@@ -347,7 +416,7 @@ def fuzz(rounds=40, seed=1):
         track = rnd.choice(midi_tracks)
         clips = track.arrangement_clips
         if side < 0.5:
-            op = rnd.choice(["note", "unnote", "move", "resize", "new", "tempo"])
+            op = rnd.choice(["note", "unnote", "move", "resize", "trim", "new", "tempo"])
             try:
                 if op == "note" and clips:
                     rnd.choice(clips).user_add_note(rnd.randint(40, 80), rnd.randint(0, 7) * 0.5)
@@ -368,6 +437,12 @@ def fuzz(rounds=40, seed=1):
                     e2 = max(c.start_time + 1.0, c.end_time + rnd.choice([-2.0, 2.0]))
                     if not any(o is not c and o.start_time < e2 and o.end_time > c.start_time for o in clips):
                         c.end_time = e2
+                elif op == "trim" and clips:
+                    # 左端を動かす（位置と中身の開始位置が一緒にずれる）
+                    c = rnd.choice(clips)
+                    d = rnd.choice([1.0, 2.0])
+                    if c.end_time - c.start_time > d + 1.0:
+                        c.start_time, c.start_marker = c.start_time + d, c.start_marker + d
                 elif op == "new":
                     start = rnd.randint(0, 12) * 4.0
                     if not any(c.start_time < start + 4 and c.end_time > start for c in clips):
@@ -386,19 +461,27 @@ def fuzz(rounds=40, seed=1):
             if not starts:
                 continue
             start = rnd.choice(starts)
-            op = rnd.choice(["clip-note", "clip-dur", "clip-move"])
+            op = rnd.choice(["clip-note", "clip-dur", "clip-move", "clip-trim"])
             if op == "clip-note":
                 bw_cmd("clip-note %s %g %d %g 0.5" % (track.name, start, rnd.randint(40, 80), rnd.randint(0, 7) * 0.5), wait=False)
             elif op == "clip-dur":
                 dur = rnd.choice([2.0, 4.0, 6.0, 8.0])
                 if all(x <= start or x >= start + dur for x in starts if x != start):
                     bw_cmd("clip-dur %s %g %g" % (track.name, start, dur), wait=False)
+            elif op == "clip-trim":
+                dur = (s.get("c/a/%s/%s" % (tid, _key(start))) or {}).get("dur") or 0
+                if dur > 3:
+                    bw_cmd("clip-trim %s %g %g" % (track.name, start, start + 1.0), wait=False)
             else:
                 new = start + rnd.choice([-4.0, 4.0, 8.0])
                 others = [x for x in starts if x != start]
                 if new >= 0 and all(abs(x - new) >= 8 for x in others):
                     bw_cmd("clip-move %s %g %g" % (track.name, start, new), wait=False)
         run_until(lambda: False, rnd.choice([0.05, 0.2, 0.5]))
+
+
+def _key(t):
+    return ("%.4f" % t).rstrip("0").rstrip(".")
 
 
 def converged():
@@ -411,9 +494,16 @@ def converged():
 def bw_cmd(*lines, wait=True):
     """Bitwig の拡張にテスト用のコマンドを送る（cmd.txt。処理されると消える）。"""
     path = os.path.join(BW_DIR, "cmd.txt")
+    # 前のコマンドがまだ処理されていなければ待つ（上書きすると前のコマンドが消えてしまう）
+    run_until(lambda: not os.path.exists(path), 5)
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    os.replace(path + ".tmp", path)
+    for _ in range(50):
+        try:
+            os.replace(path + ".tmp", path)
+            break
+        except PermissionError:  # Bitwig が読んでいる最中
+            time.sleep(0.02)
     if wait:
         run_until(lambda: not os.path.exists(path), 5)
 

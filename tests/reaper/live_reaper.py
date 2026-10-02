@@ -24,7 +24,7 @@ import Live  # noqa: E402  (モック)
 from AbletonMulti import multi  # noqa: E402
 
 LOGS = os.path.join(HERE, "logs")
-IPC = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "REAPER", "AbletonMulti", "ipc")
+IPC = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "AbletonMulti", "reaper-ipc")
 TEST_PORT = 47491
 BW_DIR = os.path.join(IPC, str(TEST_PORT))
 STATE = os.path.join(BW_DIR, "state.json")
@@ -86,7 +86,8 @@ def run_until(cond, timeout):
 
 
 def check(name, cond, timeout=6.0):
-    ok = run_until(cond, timeout)
+    # 遅延のある中継を通すときは、届くまで長めに待つ
+    ok = run_until(cond, timeout * (1.0 + float(os.environ.get("LATENCY_MS") or 0) / 100.0))
     results.append((name, ok))
     print(("PASS " if ok else "FAIL ") + name, flush=True)
     return ok
@@ -135,6 +136,21 @@ def same_clips(track):
     return [(s, d, n) for s, d, n, _ in bw_clips(track.name)] == [(s, d, n) for s, d, n, _ in live_clips(track)]
 
 
+def close_notes(track):
+    """REAPER と Live のノートが同じ（REAPER の丸め 1 目盛りくらいの差は同じとみなす）"""
+    ours = [c[2] for c in bw_clips(track.name)]
+    theirs = [c[2] for c in live_clips(track)]
+    if len(ours) != len(theirs):
+        return False
+    for a, b in zip(ours, theirs):
+        if len(a) != len(b):
+            return False
+        for x, y in zip(sorted(a), sorted(b)):
+            if x[0] != y[0] or abs(x[1] - y[1]) > 0.002 or abs(x[2] - y[2]) > 0.002:
+                return False
+    return True
+
+
 def names():
     return [t.name for t in song.tracks]
 
@@ -154,9 +170,18 @@ def main():
         print(build.stdout[-3000:])
         sys.exit(1)
 
+    def env(name):
+        # TRACE=1 で、アプリがやりとりした変更をそのまま logs/trace_<名前>.jsonl に書き出す（調査用）
+        if os.environ.get("TRACE") != "1":
+            return None
+        path = os.path.join(LOGS, "trace_%s.jsonl" % name)
+        if os.path.exists(path):
+            os.remove(path)
+        return dict(os.environ, ABLETONMULTI_TRACE=path)
+
     host = subprocess.Popen([CLI, "session", "--host", "--name", "Live", "--bridge-port", "47410", "--port", "47411",
                              "--key", "BWTEST", "--samples", os.path.join(LOGS, "samples_live")],
-                            stdout=open(os.path.join(LOGS, "app_live.txt"), "w"), stderr=subprocess.STDOUT)
+                            stdout=open(os.path.join(LOGS, "app_live.txt"), "w"), stderr=subprocess.STDOUT, env=env("live"))
     procs = [host]
     try:
         time.sleep(2.0)
@@ -165,10 +190,17 @@ def main():
         # REAPER のスクリプトをテスト用のポートにつながせる（47400 は本物のアプリ用）
         with open(PORT_FILE, "w") as f:
             f.write("%d %d" % (TEST_PORT, int((time.time() + 3600) * 1000)))
-        bitwig = subprocess.Popen([CLI, "session", "--join", "127.0.0.1:47411", "--key", "BWTEST", "--name", "REAPER",
+        room = "127.0.0.1:47411"
+        if os.environ.get("LATENCY_MS"):
+            # Wi-Fi・インターネット越しのような遅延のある中継を通してつなぐ
+            procs.append(subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "sim", "latency_proxy.py"), "47412", "47411",
+                                           os.environ["LATENCY_MS"], os.environ.get("JITTER_MS", "0")]))
+            room = "127.0.0.1:47412"
+            time.sleep(0.5)
+        bitwig = subprocess.Popen([CLI, "session", "--join", room, "--key", "BWTEST", "--name", "REAPER",
                                    "--bridge-port", str(TEST_PORT),
                                    "--samples", os.path.join(LOGS, "samples_reaper"), "--blank"],
-                                  stdout=open(os.path.join(LOGS, "app_reaper.txt"), "w"), stderr=subprocess.STDOUT)
+                                  stdout=open(os.path.join(LOGS, "app_reaper.txt"), "w"), stderr=subprocess.STDOUT, env=env("reaper"))
         procs.append(bitwig)
         run_tests()
         if "--watch" in sys.argv:
@@ -206,6 +238,27 @@ def run_tests():
     clip._notify("notes")
     check("ノートを消す", lambda: same_clips(song.tracks[0]))
 
+    # 弾いて入れたような、目盛りに乗っていないノート（REAPER は 1 拍 960 分割に丸めるので、少しずれる）
+    clip = song.tracks[0].arrangement_clips[0]
+    clip.user_add_note(50, 1.2345678, 0.3333333)
+    clip.user_add_note(52, 2.7182818, 0.1415926)
+    check("目盛りに乗っていないノート", lambda: close_notes(song.tracks[0]))
+    for step in range(4):  # 上下の矢印で 1 つずつ動かす
+        for n in clip._notes:
+            if n.pitch in (50 + step, 52 + step) and n.start_time in (1.2345678, 2.7182818):
+                n.pitch += 1
+        clip._notify("notes")
+        run_until(lambda: False, 0.15)
+    check("目盛りに乗っていないノートを上下に動かしても、REAPER で複製にならない", lambda: close_notes(song.tracks[0]), 8)
+    for n in clip._notes:
+        if n.start_time == 1.2345678:
+            n.start_time = 1.7345678
+    clip._notify("notes")
+    check("目盛りに乗っていないノートを左右に動かしても、REAPER で複製にならない", lambda: close_notes(song.tracks[0]), 8)
+    clip._notes = [n for n in clip._notes if n.pitch not in (54, 56)]
+    clip._notify("notes")
+    check("目盛りに乗っていないノートを消せる", lambda: close_notes(song.tracks[0]) and same_clips(song.tracks[0]), 8)
+
     clip = song.tracks[0].arrangement_clips[0]
     clip.start_time, clip.end_time = 12.0, 20.0
     check("クリップを動かす", lambda: same_clips(song.tracks[0]) and [c[0] for c in bw_clips("Bass")] == [12.0])
@@ -221,6 +274,45 @@ def run_tests():
 
     song.tracks[1].delete_clip(song.tracks[1].arrangement_clips[-1])
     check("クリップを消す", lambda: same_clips(song.tracks[1]) and len(bw_clips("Keys")) == 1)
+
+    # 分割（前と後ろの 2 つになり、後ろは中身の開始位置がずれる）
+    bass = song.tracks[0]
+    clip = bass.arrangement_clips[0]
+    bass.user_split(clip, clip.start_time + 4.0)
+    if not check("Live でクリップを分割する → REAPER",
+                 lambda: same_clips(bass) and len(bw_clips("Bass")) == 2):
+        print("     Live:   %s" % [(a, b, n) for a, b, n, _ in live_clips(bass)])
+        print("     REAPER: %s" % [(a, b, n) for a, b, n, _ in bw_clips("Bass")])
+        print("     REAPER p: %s" % [v.get("p") for k, v in sorted(bw().items()) if k.startswith("c/a/%s/" % bw_id("Bass")) and v])
+    bass.delete_clip(bass.arrangement_clips[1])
+    check("分割した後ろを消す → REAPER", lambda: same_clips(bass) and len(bw_clips("Bass")) == 1)
+
+    # ループしているクリップ（4 拍のループを 16 拍に伸ばした）と、頭を詰めたクリップ（開始位置が 1 拍目）
+    keys = song.tracks[1]
+    loop = keys.create_midi_clip(32.0, 16.0)
+    loop.user_add_note(60, 0.0)
+    loop.user_add_note(64, 2.0)
+    loop.loop_end = 4.0
+    trimmed = keys.create_midi_clip(52.0, 4.0)
+    trimmed.user_add_note(62, 1.5)
+    trimmed.user_add_note(65, 3.0)
+    trimmed.looping = False
+    trimmed.start_marker = 1.0
+    trimmed.end_marker = 5.0
+
+    def bw_clip(track_name, start):
+        return bw()["c/a/%s/%s" % (bw_id(track_name), start)]
+    check("ループしているクリップ（REAPER でも繰り返す）",
+          lambda: bw_clip("Keys", 32)["p"]["looping"] is True and bw_clip("Keys", 32)["p"]["le"] == 4
+          and bw_clip("Keys", 32)["dur"] == 16 and same_clips(keys))
+    check("頭を詰めたクリップ（中身の開始位置がずれない）",
+          lambda: bw_clip("Keys", 52)["p"]["sm"] == 1 and same_clips(keys))
+    before = [(c.start_time, c.end_time, c.looping, c.loop_start, c.loop_end, c.start_marker) for c in keys.arrangement_clips]
+    check("REAPER から送り返されて、ループや開始位置が変わったりしない",
+          lambda: [(c.start_time, c.end_time, c.looping, c.loop_start, c.loop_end, c.start_marker) for c in keys.arrangement_clips] == before, 3)
+    keys.delete_clip(loop)
+    keys.delete_clip(trimmed)
+    run_until(lambda: same_clips(keys), 5)
 
     song.tracks[1].name = "Piano"
     check("トラック名", lambda: bw_names() == ["Bass", "Piano", "Drums"])
@@ -313,12 +405,22 @@ def run_tests():
         return bw()["c/a/%s/4" % bw_id("Drums")]["p"]
 
     live_audio = song.tracks[2].arrangement_clips[0]
+    check("ワープマーカー（REAPER のストレッチマーカーになる）",
+          lambda: bw_audio().get("wmk") == [[m.beat_time, m.sample_time] for m in live_audio.warp_markers])
+    live_audio.add_warp_marker(Live.Clip.WarpMarker(sample_time=1.2, beat_time=2.0))
+    check("ワープマーカーを足す", lambda: bw_audio().get("wmk") == [[0, 0], [2, 1.2], [4, 2]])
+    live_audio.warping = False
+    check("ワープをオフ", lambda: bw_audio()["warp"] is False)
+    live_audio.warping = True
+    check("ワープをオン（マーカーも戻る）", lambda: bw_audio()["warp"] is True and len(bw_audio().get("wmk") or []) == 3)
     live_audio.pitch_coarse = -5
     live_audio.pitch_fine = 30.0
     check("ピッチ（半音・セント）", lambda: bw_audio()["pc"] == -5 and bw_audio()["pf"] == 30)
-    before = live_audio.pitch_coarse, live_audio.pitch_fine
+    before = (live_audio.pitch_coarse, live_audio.pitch_fine, live_audio.warping,
+              [(m.beat_time, m.sample_time) for m in live_audio.warp_markers])
     check("REAPER から送り返されて Live のオーディオが変わったりしない",
-          lambda: (live_audio.pitch_coarse, live_audio.pitch_fine) == before, 3)
+          lambda: (live_audio.pitch_coarse, live_audio.pitch_fine, live_audio.warping,
+                   [(m.beat_time, m.sample_time) for m in live_audio.warp_markers]) == before, 3)
 
 
 def fuzz(rounds=40, seed=1):

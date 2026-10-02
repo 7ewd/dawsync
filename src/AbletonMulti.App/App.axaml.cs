@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.Threading;
 
 namespace AbletonMulti.App;
 
@@ -16,6 +17,19 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var window = new MainWindow();
+            // ボタンの処理などで拾えなかったエラーでもアプリを落とさず、ログとお知らせに出す
+            Dispatcher.UIThread.UnhandledException += (_, e) =>
+            {
+                e.Handled = true;
+                try
+                {
+                    window.SessionPage.ReportError(e.Exception);
+                }
+                catch (Exception)
+                {
+                    ErrorLog.Write("UIThread", e.Exception);
+                }
+            };
             // 開発用: --host / --publish / --join アドレス --key 合言葉 / --screenshot 画像 [--delay 秒]
             var args = desktop.Args ?? [];
             string? Option(string name) => Array.IndexOf(args, name) is var i and >= 0 && i + 1 < args.Length ? args[i + 1] : null;

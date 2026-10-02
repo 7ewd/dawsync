@@ -10,7 +10,8 @@
 -- こちらで作ったトラックは中身（MIDI のアイテムがあるか）で決める。フォルダはグループとして扱う。
 -- 変更は GetProjectStateChangeCount で気づき、全部読み直して前回と比べる（Bitwig の拡張と同じやり方）。
 
-local json = require("json")
+-- json は abletonmulti.lua から渡される（loadfile(...)(json)。require は他のスクリプトの json と取り違えるので使わない）
+local json = assert((...), "model.lua: json module must be passed")
 
 local M = {}
 M.__index = M
@@ -62,9 +63,18 @@ local function full_row(r)
   return json.array(row)
 end
 
-local function note_ident(r)
-  return string.format("%d@%s+%s", math.floor(r[1] + 0.5), tostring(round(r[2])), tostring(round(r[3])))
+-- 同じノートか（音程・位置・長さ）。REAPER はノートを 1 拍 960 分割の目盛りに丸めて持つが、Live は細かい値のまま
+-- 持つので、弾いて入れたノートなどは少しずれる。1 目盛りくらいの差は同じノートとみなす
+-- （ぴったり比べると、相手が動かした・消したノートが見つからず、古いノートが残って複製に見えていた）
+local NOTE_TOLERANCE = 0.002
+local MIN_NOTE = 1 / 2048
+
+local function same_note(a, b)
+  return math.floor(a[1] + 0.5) == math.floor(b[1] + 0.5)
+    and math.abs(a[2] - b[2]) <= NOTE_TOLERANCE
+    and math.abs(a[3] - b[3]) <= NOTE_TOLERANCE
 end
+M.same_note = same_note
 
 local function row_less(a, b)
   for i = 1, math.min(#a, #b) do
@@ -95,19 +105,48 @@ end
 -- クリップの変更は値全体に加えて「変わったところ」も送る（Live の model.py の with_delta と同じ形）:
 --   delta = {"f": 変わった項目（"dur" や "p.name"）, "a": 足したノート, "d": 消したノート}
 
+-- 行を比べるための文字列（数値は 60 と 60.0、0 と -0 を同じにする。json.same と同じ比べ方）
+local function row_key(row)
+  local parts = {}
+  for i = 1, #row do
+    local v = row[i]
+    if type(v) == "number" then
+      parts[i] = v == 0 and "0" or string.format("%.17g", v)
+    else
+      parts[i] = tostring(v)
+    end
+  end
+  return table.concat(parts, " ")
+end
+
+-- 同じ行がいくつあるかを数えて比べる（1 行ずつ全部と比べるとノートが多いクリップで重い）
 local function row_diff(new_rows, old_rows)
-  local old = {}
-  for _, r in ipairs(old_rows or {}) do old[#old + 1] = full_row(r) end
+  local counts, old = {}, {}
+  for _, r in ipairs(old_rows or {}) do
+    local row = full_row(r)
+    local k = row_key(row)
+    counts[k] = (counts[k] or 0) + 1
+    old[#old + 1] = { k, row }
+  end
   local added = json.array({})
   for _, r in ipairs(new_rows or {}) do
     local row = full_row(r)
-    local found
-    for i, o in ipairs(old) do
-      if json.same(o, row) then found = i break end
+    local k = row_key(row)
+    if (counts[k] or 0) > 0 then
+      counts[k] = counts[k] - 1
+    else
+      added[#added + 1] = row
     end
-    if found then table.remove(old, found) else added[#added + 1] = row end
   end
-  return added, json.array(old)
+  -- 残った数だけ、元の順に「消したノート」にする
+  local removed = json.array({})
+  for _, e in ipairs(old) do
+    if (counts[e[1]] or 0) > 0 then
+      counts[e[1]] = counts[e[1]] - 1
+      removed[#removed + 1] = e[2]
+    end
+  end
+  return added, removed
 end
 
 function M.with_delta(key, value, previous)
@@ -147,16 +186,15 @@ local function apply_row_delta(rows, added, removed)
   local result = {}
   for _, r in ipairs(rows or {}) do result[#result + 1] = full_row(r) end
   for _, r in ipairs(removed or {}) do
-    local ident = note_ident(full_row(r))
+    local row = full_row(r)
     for i, x in ipairs(result) do
-      if note_ident(x) == ident then table.remove(result, i) break end
+      if same_note(x, row) then table.remove(result, i) break end
     end
   end
   for _, r in ipairs(added or {}) do
     local row = full_row(r)
-    local ident = note_ident(row)
     for i = #result, 1, -1 do
-      if note_ident(result[i]) == ident then table.remove(result, i) end
+      if same_note(result[i], row) then table.remove(result, i) end
     end
     result[#result + 1] = row
   end
@@ -281,18 +319,37 @@ function M:fix_orders(list)
   end
 end
 
-local function track_kind(track)
+-- トラックの種類。REAPER のトラックには MIDI／オーディオの区別が無いので:
+--   相手から来たトラック → 届いた種類（P_EXT に覚えてある）
+--   こちらで作ったトラック → 中身で決める（MIDI のアイテムがあるか空なら MIDI、オーディオだけならオーディオ）。
+--     一度アイテムが入ったら、その種類で固定する（あとから別の種類を置いても、相手の Live でトラックが
+--     作り直されて音源が消えたりしないように）
+--   中身から決めた種類（とフォルダ = グループ）は P_EXT にも書いておく（覚えておかないと、再起動やタブの
+--   切り替えのあとに読み直したとき、アイテムの並びしだいで種類が変わってしまう）
+function M:track_kind(track)
   local _, stored = reaper.GetSetMediaTrackInfo_String(track, KIND_KEY, "", false)
-  if reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH") == 1 then return "group" end
-  if stored == "midi" or stored == "audio" or stored == "group" then return stored end
-  -- こちらで作ったトラック: MIDI のアイテムがあるか空なら MIDI、オーディオだけならオーディオ
-  local items = reaper.CountTrackMediaItems(track)
-  if items == 0 then return "midi" end
-  for i = 0, items - 1 do
-    local take = reaper.GetActiveTake(reaper.GetTrackMediaItem(track, i))
-    if take and reaper.TakeIsMIDI(take) then return "midi" end
+  if reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH") == 1 then
+    if stored ~= "group" then reaper.GetSetMediaTrackInfo_String(track, KIND_KEY, "group", true) end
+    return "group"
   end
-  return "audio"
+  if stored == "midi" or stored == "audio" or stored == "group" then return stored end
+  local guid = reaper.GetTrackGUID(track)
+  self.kinds = self.kinds or {}
+  local kind = self.kinds[guid]
+  if not kind then
+    for i = 0, reaper.CountTrackMediaItems(track) - 1 do
+      local take = reaper.GetActiveTake(reaper.GetTrackMediaItem(track, i))
+      if take then
+        if reaper.TakeIsMIDI(take) then kind = "midi" break end
+        kind = "audio"
+      end
+    end
+    -- 空（テイクのあるアイテムが無い）のうちは決めない（最初に置いたアイテムで決まる）
+    if not kind then return "midi" end
+    self.kinds[guid] = kind
+  end
+  reaper.GetSetMediaTrackInfo_String(track, KIND_KEY, kind, true)
+  return kind
 end
 
 -- ---------------------------------------------------------------- read
@@ -333,12 +390,12 @@ function M:read_all()
   for n, id in ipairs(list) do
     local track = tracks[n]
     local key = "t/" .. id
-    state[key] = { o = self.order[id], k = track_kind(track), g = self.parents[id] or json.null }
+    state[key] = { o = self.order[id], k = self:track_kind(track), g = self.parents[id] or json.null }
     local _, name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
     state[key .. "/name"] = name
     local color = color_to_int(math.floor(reaper.GetMediaTrackInfo_Value(track, "I_CUSTOMCOLOR")))
     if color then state[key .. "/color"] = color end
-    if state[key].k ~= "group" then self:read_items(id, track, state) end
+    if state[key].k ~= "group" then self:read_items(id, track, state, state[key].k) end
   end
 
   -- 消えたトラックの id は忘れる
@@ -350,16 +407,51 @@ function M:read_all()
   return state
 end
 
-function M:read_items(tid, track, state)
+function M:read_items(tid, track, state, kind)
+  local _, track_name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
   for i = 0, reaper.CountTrackMediaItems(track) - 1 do
     local item = reaper.GetTrackMediaItem(track, i)
     local start = reaper.TimeMap2_timeToQN(0, reaper.GetMediaItemInfo_Value(item, "D_POSITION"))
+    local key = "c/a/" .. tid .. "/" .. time_key(start)
     local value = self:read_item(item)
-    if value then state["c/a/" .. tid .. "/" .. time_key(start)] = value end
+    if value and value.k ~= kind then
+      -- MIDI トラックのオーディオ（またはその逆）は、相手の Live に置けないので送らない
+      self:warn_once("kind:" .. tid .. ":" .. value.k, string.format(
+        "「%s」は%sトラックとして同期しているので、%sのアイテムは相手に送られません（別のトラックに置いてください）",
+        track_name, kind == "midi" and " MIDI " or "オーディオ", value.k == "midi" and " MIDI " or "オーディオ"))
+    elseif value and state[key] then
+      -- 同じ位置に 2 つ以上あると区別できない（REAPER は重ねて置けるが、Live・Bitwig では重ならない）
+      self:warn_once("overlap:" .. key, string.format(
+        "「%s」の同じ位置にアイテムが重なっているので、1 つしか同期されません（位置をずらしてください）", track_name))
+    elseif value then
+      state[key] = value
+    end
   end
 end
 
+local function take_ext(take, name, value)
+  if value == nil then
+    local _, v = reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:abletonmulti_" .. name, "", false)
+    return tonumber(v)
+  end
+  reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:abletonmulti_" .. name, tostring(value), true)
+end
+
+-- オーディオのテイクの頭のずれ（D_STARTOFFS はファイルの秒なので、再生速度で割ってプロジェクトの秒にする）
+local function play_rate(take)
+  local rate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+  if not rate or rate <= 0 then rate = 1 end
+  return rate
+end
+
+local function audio_offset(take)
+  return reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS") / play_rate(take)
+end
+
 -- アイテム 1 つを Live のクリップの形で読む
+--   MIDI: 中身の頭（PPQ 0）からの拍でノートを読む。ループはソース全体を繰り返す（Live の loop_start が 0 でない
+--         ときは、中身を loop_start だけずらして入れてあり、その量を P_EXT の shift に覚えてある）
+--   オーディオ: ファイルとピッチ。ワープは REAPER のストレッチマーカー（Live のワープマーカーと同じ「拍 ↔ 秒」）
 function M:read_item(item)
   local take = reaper.GetActiveTake(item)
   if not take then return nil end
@@ -374,21 +466,28 @@ function M:read_item(item)
   if color then props.color = color end
 
   if reaper.TakeIsMIDI(take) then
-    -- ノートの位置は「クリップの中身の頭」からの拍。中身の頭 = PPQ 0 の位置
+    local shift = take_ext(take, "shift") or 0
     local base = reaper.MIDI_GetProjQNFromPPQPos(take, 0)
-    local sm = round(start_qn - base)
+    local sm = round(start_qn - base + shift)
     local src_len, is_qn = reaper.GetMediaSourceLength(reaper.GetMediaItemTake_Source(take))
     local loop_len = is_qn and src_len or dur
-    props.sm, props.ls, props.le = sm, 0.0, round(loop_len)
-    props.em = looping and round(loop_len) or round(sm + dur)
-    if not looping then props.ls, props.le = sm, props.em end
+    props.sm = sm
+    if looping then
+      props.ls, props.le = round(shift), round(shift + loop_len)
+      props.em = props.le
+    else
+      props.em = round(sm + dur)
+      props.ls, props.le = sm, props.em
+    end
     local rows = {}
     local _, notes = reaper.MIDI_CountEvts(take)
     for n = 0, notes - 1 do
       local _, _, muted, s, e, _, pitch, vel = reaper.MIDI_GetNote(take, n)
       local qs = reaper.MIDI_GetProjQNFromPPQPos(take, s) - base
       local qe = reaper.MIDI_GetProjQNFromPPQPos(take, e) - base
-      rows[#rows + 1] = json.array({ pitch, round(qs), round(qe - qs), vel, muted and 1 or 0, 1, 0, 64 })
+      if qe - qs >= MIN_NOTE then  -- 長さ 0 のノートは読まない（聞こえも見えもしないが、送ると相手と食い違う）
+        rows[#rows + 1] = json.array({ pitch, round(qs + shift), round(qe - qs), vel, muted and 1 or 0, 1, 0, 64 })
+      end
     end
     table.sort(rows, row_less)
     local length = looping and props.le - props.ls or props.em - props.sm
@@ -404,6 +503,21 @@ function M:read_item(item)
   local coarse = math.floor(pitch + 0.5)
   props.pc = coarse
   props.pf = round((pitch - coarse) * 100, 2)
+  local count = reaper.GetTakeNumStretchMarkers(take)
+  props.warp = count >= 2
+  if count >= 2 then
+    local sm = take_ext(take, "sm") or 0
+    local markers = json.array({})
+    for i = 0, count - 1 do
+      local _, mpos, srcpos = reaper.GetTakeStretchMarker(take, i)
+      local beat = reaper.TimeMap2_timeToQN(0, pos + mpos) - start_qn + sm
+      markers[#markers + 1] = json.array({ round(beat), round(srcpos, 6) })
+    end
+    props.wmk = markers
+  else
+    -- ストレッチマーカーが無いときは、ファイルのどこから鳴らすか（D_STARTOFFS、秒）を、アイテムの頭からの拍にする
+    props.sm = round(reaper.TimeMap2_timeToQN(0, pos + audio_offset(take)) - start_qn)
+  end
   return { k = "audio", len = dur, dur = dur, file = file, p = props }
 end
 
@@ -510,6 +624,12 @@ function M:apply(raw_ops, force, pending)
     local waiting = pending[key]
     if force or not waiting or #waiting == 0 then
       ops[#ops + 1] = o
+    elseif value == nil or value == json.null then
+      -- 相手の削除（サーバーには自分の編集より先に届いた）。自分の変更がノートなどの部分的な編集だけなら、
+      -- その編集はサーバーで「無いクリップへの編集」として捨てられるので、削除を反映する
+      local mine = {}
+      for _, set in ipairs(waiting) do for f in pairs(set) do mine[f] = true end end
+      if not mine["*"] then ops[#ops + 1] = o end
     elseif type(value) == "table" and type(value.delta) == "table" then
       local mine = {}
       for _, set in ipairs(waiting) do for f in pairs(set) do mine[f] = true end end
@@ -526,6 +646,8 @@ function M:apply(raw_ops, force, pending)
     end
   end
   if #ops == 0 then return end
+  local batch = {}
+  for _, o in ipairs(ops) do batch[o.k] = true end
 
   self:read_all()
   self.parents_before = copy(self.parents)
@@ -564,14 +686,19 @@ function M:apply(raw_ops, force, pending)
   self:restore_selection(selected)
   self.moves, self.moved_away = {}, {}
 
-  -- 反映した結果を「最後の値」にする（送り返さない）
+  -- 反映した結果を「最後の値」にする（送り返さない）。ただし、このまとまりに無いクリップ（アイテム）が
+  -- 増えた・消えたのはこちらで動いたものなので取り込まず、次に送る（取り込むと、その変更が相手に届かない）
   local state = self:read_all()
+  local function other_clip(key)
+    local p = split(key)
+    return p[1] == "c" and not batch[key] and state["t/" .. (p[3] or "")] ~= nil
+  end
   for key in pairs(applied) do self.last[key] = state[key] end
   for key, value in pairs(state) do
-    if self.last[key] == nil then self.last[key] = value end
+    if self.last[key] == nil and not other_clip(key) then self.last[key] = value end
   end
   for key in pairs(self.last) do
-    if state[key] == nil then self.last[key] = nil end
+    if state[key] == nil and not other_clip(key) then self.last[key] = nil end
   end
 end
 
@@ -657,7 +784,8 @@ function M:apply_track(id, value)
       self.tracks[id] = nil
     end
     self.order[id] = nil
-    self:read_all()
+    -- ここでは読み直さない（読み直すと、並べ替える前の並びで並び順を直してしまい、届いた並び順が消える。
+    -- 親子は layout が反映前のものを使い、最後に apply が読み直す）
     return true
   end
   self.order[id] = value.o or 0
@@ -733,7 +861,7 @@ function M:layout()
     reaper.SetMediaTrackInfo_Value(self.tracks[id], "I_FOLDERDEPTH", nxt - levels[i])
   end
   self.desired_parent = {}
-  self:read_all()
+  -- 読み直しは apply の最後にまとめて行う（self.tracks はここまでで最新になっている）
 end
 
 -- ---------------------------------------------------------------- selection
@@ -758,10 +886,18 @@ end
 
 -- ---------------------------------------------------------------- clips
 
-local function find_item(track, key)
+-- read_items と同じ選び方でアイテムを探す（テイクの無いもの・トラックと種類の違うもの・同じ位置の 2 つ目以降は
+-- 同期していないので、相手の削除や編集で触らないように）
+function M:find_item(track, key)
+  local kind = self:track_kind(track)
+  if kind == "group" then return nil end
   for i = 0, reaper.CountTrackMediaItems(track) - 1 do
     local item = reaper.GetTrackMediaItem(track, i)
-    if time_key(reaper.TimeMap2_timeToQN(0, reaper.GetMediaItemInfo_Value(item, "D_POSITION"))) == key then return item end
+    local take = reaper.GetActiveTake(item)
+    if take and (reaper.TakeIsMIDI(take) and "midi" or "audio") == kind
+      and time_key(reaper.TimeMap2_timeToQN(0, reaper.GetMediaItemInfo_Value(item, "D_POSITION"))) == key then
+      return item
+    end
   end
   return nil
 end
@@ -773,7 +909,7 @@ function M:find_moves(ops)
   for _, o in ipairs(ops) do
     local p = split(o.k)
     if #p == 4 and p[1] == "c" and p[2] == "a" and self.tracks[p[3]] then
-      local exists = find_item(self.tracks[p[3]], p[4]) ~= nil
+      local exists = self:find_item(self.tracks[p[3]], p[4]) ~= nil
       local has = o.v ~= nil and o.v ~= json.null
       if not has and exists then removed[p[3]] = removed[p[3]] or {} table.insert(removed[p[3]], p[4]) end
       if has and not exists then added[p[3]] = added[p[3]] or {} table.insert(added[p[3]], p[4]) end
@@ -787,35 +923,97 @@ function M:find_moves(ops)
   end
 end
 
+-- MIDI のアイテムの形（ソースの長さ・中身のずらし・開始位置）を、Live のクリップの値から決める
+local function midi_shape(value)
+  local p = value.p or {}
+  local dur = math.max(tonumber(value.dur) or tonumber(value.len) or 4, 0.25)
+  local sm = tonumber(p.sm) or 0
+  if p.looping then
+    local ls = tonumber(p.ls) or 0
+    local le = tonumber(p.le) or (ls + (tonumber(value.len) or dur))
+    return { looping = true, shift = ls, source = math.max(le - ls, 1 / 64), offset = sm - ls, dur = dur }
+  end
+  return { looping = false, shift = 0, source = math.max(sm + dur, 1 / 64), offset = sm, dur = dur }
+end
+
+-- REAPER のストレッチマーカーを Live のワープマーカーに合わせる（[[拍, 秒], ...]、拍はクリップの中身の位置）
+-- マーカーを置かないとき（wmk が無い）は、今のマーカーを消すだけ（ユーザーの D_STARTOFFS・D_PLAYRATE は変えない）
+local function set_stretch_markers(item, take, start_qn, sm, wmk)
+  local count = reaper.GetTakeNumStretchMarkers(take)
+  if count > 0 then reaper.DeleteTakeStretchMarkers(take, 0, count) end
+  if type(wmk) ~= "table" or #wmk < 2 then return end
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  reaper.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", 1)
+  reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0)
+  for _, m in ipairs(wmk) do
+    local at = reaper.TimeMap2_QNToTime(0, start_qn + m[1] - sm) - pos
+    reaper.SetTakeStretchMarker(take, -1, at, m[2])
+  end
+end
+
 function M:apply_clip(tid, key_time, value)
   local track = self.tracks[tid]
   local key = "c/a/" .. tid .. "/" .. key_time
-  local item = find_item(track, key_time)
+  local item = self:find_item(track, key_time)
   if not value then
     if item and not (self.moved_away or {})[key] then reaper.DeleteTrackMediaItem(track, item) end
     return
   end
   local start_qn = tonumber(key_time)
   if not item and self.moves and self.moves[key] then
-    item = find_item(track, self.moves[key])
+    item = self:find_item(track, self.moves[key])
     if item then reaper.SetMediaItemInfo_Value(item, "D_POSITION", reaper.TimeMap2_QNToTime(0, start_qn)) end
   end
-  if item and type(value.delta) == "table" then
-    local current = self:read_item(item)
-    if current and current.k == value.k then value = M.merge_delta(current, value) end
+  if not item and type(value.delta) == "table" then
+    -- 無いアイテムへの編集（相手が編集している間に、こちらで消した・動かした）。サーバーと同じく反映しない
+    -- （反映すると、動かしたアイテムが元の位置にも戻ってきて 2 つになる）
+    return
   end
+  local current = item and self:read_item(item)
+  if type(value.delta) == "table" then
+    -- 変わったところだけの値（ノートの "n" などが無い）なので、同じ種類の今のアイテムに重ねるときだけ使う
+    -- （種類が違うアイテムを、これで作り直すと中身が空になる）
+    if not current or current.k ~= value.k then return end
+    value = M.merge_delta(current, value)
+  end
+  local p = value.p or {}
+  local dur = math.max(tonumber(value.dur) or tonumber(value.len) or 4, 0.25)
+
+  -- 作り直しが要るか（種類・ファイル・MIDI のループの形が変わった）
   if item then
-    local current = self:read_item(item)
-    if not current or current.k ~= value.k or (value.k == "audio" and current.file ~= value.file) then
+    local cp = current and current.p or {}
+    local recreate = not current or current.k ~= value.k or (value.k == "audio" and current.file ~= value.file)
+    if not recreate and value.k == "midi" then
+      recreate = (cp.looping and true or false) ~= (p.looping and true or false)
+        or math.abs((tonumber(cp.sm) or 0) - (tonumber(p.sm) or 0)) > 1e-4
+        or (p.looping and (math.abs((tonumber(cp.ls) or 0) - (tonumber(p.ls) or 0)) > 1e-4
+                        or math.abs((tonumber(cp.le) or 0) - (tonumber(p.le) or 0)) > 1e-4))
+    end
+    if recreate and value.k == "audio" and (type(value.file) ~= "string" or not reaper.file_exists(value.file)) then
+      -- 新しいファイルがまだ届いていない。先に消すとアイテムごと無くなるので、今のアイテムを残す
+      self:warn_once("nofile:" .. key, "サンプルファイルが届いていないのでアイテムを作れませんでした")
+      return
+    end
+    if recreate then
       reaper.DeleteTrackMediaItem(track, item)
-      item = nil
+      item, current = nil, nil
     end
   end
-  local dur = math.max(tonumber(value.dur) or tonumber(value.len) or 4, 0.25)
-  local p = value.p or {}
+
+  local s = reaper.TimeMap2_QNToTime(0, start_qn)
+  local e = reaper.TimeMap2_QNToTime(0, start_qn + dur)
+  local take
   if not item then
     if value.k == "midi" then
-      item = reaper.CreateNewMIDIItemInProj(track, start_qn, start_qn + dur, true)
+      local shape = midi_shape(value)
+      item = reaper.CreateNewMIDIItemInProj(track, start_qn, start_qn + shape.source, true)
+      take = reaper.GetActiveTake(item)
+      if shape.shift ~= 0 then take_ext(take, "shift", shape.shift) end
+      if shape.offset ~= 0 then
+        reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS",
+          reaper.TimeMap2_QNToTime(0, start_qn + shape.offset) - s)
+      end
+      reaper.SetMediaItemInfo_Value(item, "B_LOOPSRC", shape.looping and 1 or 0)
     else
       local file = value.file
       if type(file) ~= "string" or not reaper.file_exists(file) then
@@ -823,40 +1021,61 @@ function M:apply_clip(tid, key_time, value)
         return
       end
       item = reaper.AddMediaItemToTrack(track)
-      local take = reaper.AddTakeToMediaItem(item)
+      take = reaper.AddTakeToMediaItem(item)
       reaper.SetMediaItemTake_Source(take, reaper.PCM_Source_CreateFromFile(file))
-      local s = reaper.TimeMap2_QNToTime(0, start_qn)
       reaper.SetMediaItemInfo_Value(item, "D_POSITION", s)
-      reaper.SetMediaItemInfo_Value(item, "D_LENGTH", reaper.TimeMap2_QNToTime(0, start_qn + dur) - s)
-    end
-  else
-    local s = reaper.TimeMap2_QNToTime(0, start_qn)
-    local e = reaper.TimeMap2_QNToTime(0, start_qn + dur)
-    if math.abs(reaper.GetMediaItemInfo_Value(item, "D_LENGTH") - (e - s)) > 1e-6 then
-      reaper.SetMediaItemInfo_Value(item, "D_LENGTH", e - s)
+      reaper.SetMediaItemInfo_Value(item, "B_LOOPSRC", p.looping and 1 or 0)
     end
   end
-  local take = reaper.GetActiveTake(item)
+  take = take or reaper.GetActiveTake(item)
   if not take then return end
+  if math.abs(reaper.GetMediaItemInfo_Value(item, "D_LENGTH") - (e - s)) > 1e-6 then
+    reaper.SetMediaItemInfo_Value(item, "D_LENGTH", e - s)
+  end
   if type(p.name) == "string" then reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", p.name, true) end
   if type(p.color) == "number" then reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", int_to_color(p.color)) end
-  if p.looping ~= nil then reaper.SetMediaItemInfo_Value(item, "B_LOOPSRC", p.looping and 1 or 0) end
   if value.k == "midi" then
-    self:write_notes(take, value.n or {})
-  elseif p.pc ~= nil or p.pf ~= nil then
-    reaper.SetMediaItemTakeInfo_Value(take, "D_PITCH", (tonumber(p.pc) or 0) + (tonumber(p.pf) or 0) / 100)
+    self:write_notes(take, value.n or {}, take_ext(take, "shift") or 0)
+  else
+    if p.looping ~= nil then reaper.SetMediaItemInfo_Value(item, "B_LOOPSRC", p.looping and 1 or 0) end
+    if p.pc ~= nil or p.pf ~= nil then
+      reaper.SetMediaItemTakeInfo_Value(take, "D_PITCH", (tonumber(p.pc) or 0) + (tonumber(p.pf) or 0) / 100)
+    end
+    local sm = tonumber(p.sm) or 0
+    local cp = current and current.p or {}
+    local want = p.warp ~= false and type(p.wmk) == "table" and #p.wmk >= 2 and p.wmk or nil
+    if want then
+      if not json.same(want, cp.wmk) or math.abs((take_ext(take, "sm") or 0) - sm) > 1e-6 then
+        take_ext(take, "sm", sm)
+        set_stretch_markers(item, take, start_qn, sm, want)
+      end
+    else
+      if cp.wmk ~= nil then set_stretch_markers(item, take, start_qn, sm, nil) end
+      -- マーカーが無いときは、ファイルのどこから鳴らすかを D_STARTOFFS で合わせる（sm が届いたときだけ）
+      if type(p.sm) == "number" then
+        local offs = reaper.TimeMap2_QNToTime(0, start_qn + sm) - s
+        if math.abs(audio_offset(take) - offs) > 1e-6 then
+          reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", offs * play_rate(take))
+        end
+      end
+    end
   end
   reaper.UpdateItemInProject(item)
 end
 
 -- ノートを rows の状態にする。変わっていないノートはそのまま残す
-function M:write_notes(take, rows)
+function M:write_notes(take, rows, shift)
+  shift = shift or 0
+  -- 音程ごとに、置きたいノートの一覧
   local want = {}
   for _, r in ipairs(rows) do
     local row = full_row(r)
-    local ident = note_ident(row)
-    want[ident] = want[ident] or {}
-    table.insert(want[ident], row)
+    row[2] = row[2] - shift
+    local pitch = math.floor(row[1] + 0.5)
+    if row[3] > 0 then  -- 長さ 0 のノート（Bitwig の切れ端など）は置かない
+      want[pitch] = want[pitch] or {}
+      table.insert(want[pitch], row)
+    end
   end
   local base = reaper.MIDI_GetProjQNFromPPQPos(take, 0)
   local _, count = reaper.MIDI_CountEvts(take)
@@ -865,10 +1084,13 @@ function M:write_notes(take, rows)
     local _, sel, muted, s, e, chan, pitch, vel = reaper.MIDI_GetNote(take, n)
     local qs = reaper.MIDI_GetProjQNFromPPQPos(take, s) - base
     local qe = reaper.MIDI_GetProjQNFromPPQPos(take, e) - base
-    local ident = note_ident({ pitch, qs, qe - qs })
-    local bucket = want[ident]
-    if bucket and #bucket > 0 then
-      local row = table.remove(bucket, 1)
+    local bucket = want[pitch]
+    local found
+    for i, row in ipairs(bucket or {}) do
+      if same_note(row, { pitch, qs, qe - qs }) then found = i break end
+    end
+    if found then
+      local row = table.remove(bucket, found)
       local new_vel = math.max(1, math.min(127, math.floor(row[4] + 0.5)))
       local new_mute = row[5] ~= 0
       if new_vel ~= vel or new_mute ~= muted then

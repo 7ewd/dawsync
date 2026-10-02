@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace AbletonMulti.Core.Sync;
 
 /// <summary>
@@ -7,9 +9,12 @@ namespace AbletonMulti.Core.Sync;
 public static class ReaperScriptInstaller
 {
     private const string ResourcePrefix = "ReaperScript/";
+    // 行の最後に付ける印（入っているかはこれで見る。前の版の「dofile(...) -- AbletonMulti」も同じ印で見つかる）
     private const string StartupMarker = "-- AbletonMulti";
+    // スクリプトのフォルダが消されていても REAPER の起動時にエラーにならないよう、あるときだけ読み込む
     private const string StartupLine =
-        "dofile(reaper.GetResourcePath() .. \"/Scripts/AbletonMulti/abletonmulti.lua\") " + StartupMarker;
+        "do local f = reaper.GetResourcePath() .. \"/Scripts/AbletonMulti/abletonmulti.lua\"; " +
+        "if reaper.file_exists(f) then dofile(f) end end " + StartupMarker;
 
     /// <summary>REAPER の設定フォルダ（Options → Show REAPER resource path で開く場所）。</summary>
     public static string ResourceDirectory
@@ -40,13 +45,24 @@ public static class ReaperScriptInstaller
     public static ScriptInstallState GetState()
     {
         if (!File.Exists(Path.Combine(ScriptDirectory, "abletonmulti.lua"))) return ScriptInstallState.NotInstalled;
-        if (!File.Exists(StartupScript) || !File.ReadAllText(StartupScript).Contains(StartupMarker)) return ScriptInstallState.Outdated;
+        if (!StartupHasMarker()) return ScriptInstallState.Outdated;
         foreach (var (name, content) in EmbeddedFiles())
         {
             var path = Path.Combine(ScriptDirectory, name);
-            if (!File.Exists(path) || !File.ReadAllBytes(path).AsSpan().SequenceEqual(content)) return ScriptInstallState.Outdated;
+            if (!File.Exists(path) || !File.ReadAllBytes(path).AsSpan().SequenceEqual(content))
+                return InstalledIsNewer() ? ScriptInstallState.Installed : ScriptInstallState.Outdated;
         }
         return ScriptInstallState.Installed;
+    }
+
+    /// <summary>入っているスクリプトの方が、このアプリに入っているものより新しい（古いアプリで上書きして戻さない）。</summary>
+    private static bool InstalledIsNewer()
+    {
+        const string pattern = "local VERSION\\s*=\\s*\"([^\"]+)\"";
+        var path = Path.Combine(ScriptDirectory, "abletonmulti.lua");
+        var embedded = EmbeddedFiles().FirstOrDefault(f => f.Name == "abletonmulti.lua").Content;
+        if (!File.Exists(path) || embedded is null) return false;
+        return AppInfo.Compare(AppInfo.FindVersion(File.ReadAllBytes(path), pattern), AppInfo.FindVersion(embedded, pattern)) > 0;
     }
 
     /// <summary>スクリプトを入れる。REAPER を次に起動したときから自動で動く（起動中なら再起動が必要）。</summary>
@@ -55,14 +71,23 @@ public static class ReaperScriptInstaller
         Directory.CreateDirectory(ScriptDirectory);
         foreach (var (name, content) in EmbeddedFiles())
             File.WriteAllBytes(Path.Combine(ScriptDirectory, name), content);
-        var startup = File.Exists(StartupScript) ? File.ReadAllText(StartupScript) : "";
-        if (!startup.Contains(StartupMarker))
+        // __startup.lua はユーザーのファイル（Shift-JIS などのこともある）なので、文字として読み書きし直さず、
+        // 末尾にバイトのまま 1 行足すだけにする
+        var startup = File.Exists(StartupScript) ? File.ReadAllBytes(StartupScript) : [];
+        if (!ContainsMarker(startup))
         {
-            if (startup.Length > 0 && !startup.EndsWith('\n')) startup += "\n";
-            File.WriteAllText(StartupScript, startup + StartupLine + "\n");
+            var line = (startup.Length > 0 && startup[^1] != (byte)'\n' ? "\n" : "") + StartupLine + "\n";
+            using var stream = new FileStream(StartupScript, FileMode.Append, FileAccess.Write, FileShare.Read);
+            stream.Write(Encoding.UTF8.GetBytes(line));
         }
         return ScriptDirectory;
     }
+
+    private static bool StartupHasMarker() => File.Exists(StartupScript) && ContainsMarker(File.ReadAllBytes(StartupScript));
+
+    // 印は ASCII だけなので、文字コードに関係なくバイトで探せる
+    private static bool ContainsMarker(byte[] content) =>
+        content.AsSpan().IndexOf(Encoding.ASCII.GetBytes(StartupMarker)) >= 0;
 
     private static IEnumerable<(string Name, byte[] Content)> EmbeddedFiles()
     {

@@ -63,8 +63,12 @@ public sealed class FileStore
     public string? Find(string sha) =>
         _knownPaths.TryGetValue(sha, out var path) && File.Exists(path) ? path : null;
 
+    /// <summary>SHA-256 の 16 進（小文字 64 文字）か。フォルダ名に使うので、それ以外（"..\\" など）は受け付けない。</summary>
+    public static bool IsHash(string? sha) => sha is { Length: 64 } && sha.All(char.IsAsciiHexDigitLower);
+
     public string PathForDownload(string sha, string name)
     {
+        if (!IsHash(sha)) throw new ArgumentException("bad hash", nameof(sha));
         var safeName = string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
         if (safeName.Length == 0) safeName = "sample";
         return Path.Combine(CacheDirectory, sha, safeName);
@@ -144,6 +148,7 @@ public sealed class FileStore
         {
             var file = obj["file"]!.AsObject();
             var sha = (string?)file["sha256"];
+            if (!IsHash(sha)) sha = null;  // 相手から届いたものなので、ファイルのパスに使う前に形を確かめる
             var name = (string?)file["name"] ?? "sample";
             string? path = null;
             if (sha is not null)
@@ -173,7 +178,7 @@ public sealed class FileStore
             switch (node)
             {
                 case JsonObject o:
-                    if (o["file"] is JsonObject f && (string?)f["sha256"] is { } sha) result.Add(sha);
+                    if (o["file"] is JsonObject f && (string?)f["sha256"] is { } sha && IsHash(sha)) result.Add(sha);
                     foreach (var (_, child) in o) Visit(child);
                     break;
                 case JsonArray a:

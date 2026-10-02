@@ -131,7 +131,7 @@ public static class PluginScanner
                     if (c.TryGetProperty("CID", out var cid) && cid.GetString() is { } s)
                         ids.Add(s.Replace("-", ""));
         }
-        catch (Exception e) when (e is JsonException or IOException or InvalidOperationException) { }
+        catch (Exception e) when (e is JsonException or IOException or InvalidOperationException or UnauthorizedAccessException) { }
         return ids;
     }
 }

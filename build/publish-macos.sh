@@ -27,22 +27,19 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>CFBundleDocumentTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleTypeName</key><string>Ableton Live Set</string>
-      <key>CFBundleTypeExtensions</key><array><string>als</string></array>
-      <key>CFBundleTypeRole</key><string>Viewer</string>
-    </dict>
-  </array>
+  <key>NSLocalNetworkUsageDescription</key><string>同じネットワークにいる人のルームにつないだり、自分のルームに参加してもらったりするために使います。</string>
 </dict>
 </plist>
 EOF
 
 # Apple Silicon では署名が無いと起動できないので、アドホック署名だけしておく
+# （公証はしていないので、受け取った人は初回だけ次の手順で開く）
+#   macOS 15 以降: 一度ダブルクリックしてから「システム設定」→「プライバシーとセキュリティ」→「このまま開く」
+#   macOS 14: AbletonMulti.app を右クリック →「開く」
 codesign --force --deep --sign - "$APP"
 
 (cd "$(dirname "$APP")" && ditto -c -k --keepParent AbletonMulti.app "$ROOT/dist/AbletonMulti-$RID.zip")
 echo "完成: $ROOT/dist/AbletonMulti-$RID.zip"
+echo "（macOS 14 以降が必要です。初回は「システム設定」→「プライバシーとセキュリティ」→「このまま開く」で開いてください）"

@@ -367,14 +367,38 @@ class Track(DeviceContainer):
     def delete_clip(self, clip):
         self.arrangement_clips = [c for c in self.arrangement_clips if c is not clip]
 
+    # テスト用: ユーザーがクリップを分割した（Ctrl+E。前と後ろの 2 つになり、中身の位置はそのまま）
+    def user_split(self, clip, at):
+        rest = [c for c in self.arrangement_clips if c is not clip]
+        self.arrangement_clips = sorted(rest + [_piece(clip, clip.start_time, at), _piece(clip, at, clip.end_time)],
+                                        key=lambda c: c.start_time)
+
+    def duplicate_clip_to_arrangement(self, clip, destination_time):
+        """本物と同じく、クリップを丸ごと（ノートの MPE なども）複製する。"""
+        copy = Clip(clip.end_time - clip.start_time, destination_time, file_path=clip.file_path)
+        copy._notes = [n.copy() for n in clip._notes]
+        for attr in ("name", "color", "looping", "loop_start", "loop_end", "start_marker", "end_marker"):
+            object.__setattr__(copy, attr, getattr(clip, attr))
+        if clip.is_audio_clip:
+            for attr in ("gain", "pitch_coarse", "pitch_fine", "warping", "warp_mode"):
+                object.__setattr__(copy, attr, getattr(clip, attr))
+            copy.warp_markers = list(clip.warp_markers)
+        return self._place(copy)
+
 
 Track.Track = Track  # Live.Track.Track として使えるように
 
 
 def _piece(clip, start, end):
+    """本物と同じく、切れ端は中身の位置（開始位置・ループ）をそのまま引き継ぐ。"""
     piece = Clip(end - start, start, file_path=clip.file_path)
     piece._notes = [n.copy() for n in clip._notes]
     piece.name = clip.name
+    offset = start - clip.start_time
+    for attr in ("looping", "loop_start", "loop_end"):
+        object.__setattr__(piece, attr, getattr(clip, attr))
+    object.__setattr__(piece, "start_marker", clip.start_marker + offset)
+    object.__setattr__(piece, "end_marker", clip.start_marker + offset + (end - start))
     return piece
 
 

@@ -38,9 +38,17 @@ public class BridgeExtension extends ControllerExtension {
     private static final String APP_HOST = "127.0.0.1";
     private static final int APP_PORT = 47400;
     private static final int PROTOCOL = 2;
-    private static final long FULL_CHECK_MS = 1000;
+    // 変更の通知を見落としたときのための読み直しの間隔（通知が来たらすぐ読むので、長めでよい。重いプロジェクトで毎秒読まないように）
+    private static final long FULL_CHECK_MS = 5000;
     private static final long MIN_CHECK_MS = 100;
     private static final File LOG_DIR = new File(System.getProperty("java.io.tmpdir"), "abletonmulti-bitwig");
+    // 調査用の仕組み（cmd.txt・port など）は、環境変数 ABLETONMULTI_DEBUG=1 で起動したときだけ使う
+    // （一時フォルダーには誰でもファイルを置けるので、ファイルがあるだけでは動かさない）
+    private static final boolean DEBUG_ENV = "1".equals(System.getenv("ABLETONMULTI_DEBUG"));
+    // main スレッドの tick がこれだけ戻ってこなければ、失われたとみなして次を投げる
+    private static final long BUSY_TIMEOUT_MS = 5000;
+    // 対応していない（内部の API が見つからない）ときに、つなぎ直しを試す間隔（プロジェクトを開いている途中だっただけかもしれない）
+    private static final long RETRY_ATTACH_MS = 10000;
 
     private static final Object CONNECTED = new Object();
     private static final Object DISCONNECTED = new Object();
@@ -49,6 +57,7 @@ public class BridgeExtension extends ControllerExtension {
     private Object mProjectProxy;
     private volatile boolean mRunning;
     private final AtomicBoolean mBusy = new AtomicBoolean();
+    private volatile long mBusySince;
     private volatile String mPopup;
 
     // 通信
@@ -67,7 +76,14 @@ public class BridgeExtension extends ControllerExtension {
     private boolean mConnected;
     private volatile boolean mDirty;
     private long mLastFullCheck;
-    private boolean mBroken;
+    private volatile boolean mBroken;
+    private long mBrokenAt;
+    private boolean mBrokenShown;
+    // 別のプロジェクトを開いた。アプリが合わせ直す（snapshot_req・adopt・blank）までは、届いた変更（apply）は
+    // 前のプロジェクトの id のものなので反映しない
+    private boolean mAwaitResync;
+    private boolean mGreeted;
+    private boolean mBusyShown;
 
     protected BridgeExtension(BridgeDefinition definition, ControllerHost host) {
         super(definition, host);
@@ -112,7 +128,13 @@ public class BridgeExtension extends ControllerExtension {
             mPopup = null;
             mHost.showPopupNotification(popup);
         }
+        if (mBusy.get() && System.currentTimeMillis() - mBusySince > BUSY_TIMEOUT_MS) {
+            // 投げた tick が実行されなかった（Bitwig 側で捨てられた）。このままだと二度と tick しないので、やり直す
+            log("main thread tick did not run for " + BUSY_TIMEOUT_MS + " ms; retrying");
+            mBusy.set(false);
+        }
         if (mBusy.compareAndSet(false, true)) {
+            mBusySince = System.currentTimeMillis();
             try {
                 Internals.exec(mProjectProxy, () -> {
                     try {
@@ -132,7 +154,11 @@ public class BridgeExtension extends ControllerExtension {
     }
 
     private void mainTick() throws Exception {
-        if (mBroken) return;
+        if (mBroken) {
+            dropInbox();
+            if (System.currentTimeMillis() - mBrokenAt < RETRY_ATTACH_MS) return;
+            mBroken = false;  // もう一度試す（だめなら attach がまた mBroken にする）
+        }
         Object dig = Internals.projectTarget(mProjectProxy);
         if (dig == null) return;
         if (mModel == null || mModel.dig != dig) attach(dig);
@@ -142,7 +168,9 @@ public class BridgeExtension extends ControllerExtension {
         // 届いた変更を反映する前に、自分の変更を先に送る（ユーザーの操作が上書きされて消えないように）
         flushLocal(false);
         if (mConnected && mModel.hasDeferred()) {
-            // 前の tick で後回しにしたパラメータの変更（BitwigModel の PARAMETERS_FIRST を参照）
+            // 前の tick で後回しにしたパラメータの変更（BitwigModel の PARAMETERS_FIRST を参照）。
+            // 反映の前に、こちらのまだ送っていない変更を送る（反映の後だと「反映した結果」として送られなくなる）
+            flushLocal(true);
             mInternals.begin(mModel.dig, "AbletonMulti");
             try {
                 mModel.applyDeferred(mPending);
@@ -172,12 +200,23 @@ public class BridgeExtension extends ControllerExtension {
                 @Override public void warn(String message) { BridgeExtension.this.warn(message); }
             });
         } catch (Throwable t) {
-            // この Bitwig では内部の API が見つからない
+            // この Bitwig では内部の API が見つからない。アプリにはつながない（つないだままだと届いたものが溜まり続ける）
+            mModel = null;
             mBroken = true;
-            log("this Bitwig is not supported: " + stack(t));
-            mPopup = "AbletonMulti: この Bitwig のバージョンには対応していません";
+            mBrokenAt = System.currentTimeMillis();
+            closeSocket();
+            if (!mBrokenShown) {
+                log("this Bitwig is not supported: " + stack(t));
+                mPopup = "AbletonMulti: この Bitwig のバージョンには対応していません";
+            } else {
+                log("attach failed again: " + t);
+            }
+            mBrokenShown = true;
             return;
         }
+        if (mBrokenShown) log("attach succeeded after an earlier failure");
+        mBrokenShown = false;
+        mAwaitResync = true;
         Runnable mark = () -> mDirty = true;
         listen(dig, mark);
         listen(Internals.target(mApi.getTrackGroup()), mark);
@@ -209,6 +248,18 @@ public class BridgeExtension extends ControllerExtension {
         mApi = null;
     }
 
+    /** 対応していない間に届いたものを捨てる（溜まり続けないように）。接続の出入りだけは見ておく。 */
+    private void dropInbox() {
+        Object item;
+        while ((item = mInbox.poll()) != null) {
+            if (item == CONNECTED) closeSocket();  // 閉じる前につながっていた分。切れたら DISCONNECTED が来る
+            else if (item == DISCONNECTED) {
+                mConnected = false;
+                mPending.clear();
+            }
+        }
+    }
+
     private void flushLocal(boolean force) {
         if (!mConnected || mModel == null) return;
         long now = System.currentTimeMillis();
@@ -223,8 +274,9 @@ public class BridgeExtension extends ControllerExtension {
 
     /** 調査用: LOG_DIR に cmd.txt を置くと、1 行ずつ実行して消す（開発中の実験用）。 */
     private void debugCommands() {
+        BitwigModel.trace = debugEnabled();
         File file = new File(LOG_DIR, "cmd.txt");
-        if (!file.exists() || !new File(LOG_DIR, "debug").exists()) return;
+        if (!BitwigModel.trace || !file.exists()) return;
         List<String> lines;
         try {
             lines = java.nio.file.Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
@@ -253,9 +305,39 @@ public class BridgeExtension extends ControllerExtension {
                         mInternals.insertTrack(Internals.target(root), Internals.target(f.createInstrumentTrack()), Integer.parseInt(a[1]));
                     }
                     case "blank" -> mModel.makeBlank();
-                    case "clip-dur", "clip-move", "clip-note" -> {
+                    case "clip-split" -> {
+                        // clip-split トラック名 開始 分ける位置: 前と後ろの 2 つにする（後ろは中身を同じだけずらした複製）
+                        var track = findTrack(root, a[1]);
+                        com.bitwig.extension.api.project.timeline.Clip clip = null;
+                        for (Object e : track.clipTimeline().getEvents())
+                            if (e instanceof com.bitwig.extension.api.project.timeline.Clip c && Math.abs(c.getTime() - Double.parseDouble(a[2])) < 1e-6) clip = c;
+                        if (!(clip instanceof com.bitwig.extension.api.project.timeline.NoteClip)) throw new IllegalArgumentException("no note clip at " + a[2]);
+                        double at = Double.parseDouble(a[3]), start = clip.getTime(), end = start + clip.getDuration();
+                        var f = (com.bitwig.extension.api.project.Factory) mApi.getClass().getMethod("getFactory").invoke(mApi);
+                        mInternals.begin(mModel.dig, "AbletonMulti test");
+                        try {
+                            var back = f.createNoteClip(false);
+                            for (Object o : clip.getContent().getEventTimeline().getEvents())
+                                if (o instanceof com.bitwig.extension.api.project.timeline.InstrumentNote n)
+                                    back.getContent().getEventTimeline().addEvent(f.createInstrumentNote(0, n.getKey(),
+                                            BitwigModel.put(n.getTime()), BitwigModel.put(n.getDuration()), n.getOnVelocity(), n.getOffVelocity()));
+                            back.setTime(BitwigModel.put(at));
+                            back.setIsLoopEnabled(clip.isLoopEnabled());
+                            back.setLoopStart(BitwigModel.put(clip.getLoopStart()));
+                            back.setLoopDuration(BitwigModel.put(clip.getLoopDuration()));
+                            back.setPlayStartOffset(BitwigModel.put(BitwigModel.round(clip.getPlayStartOffset() + at - start)));
+                            back.setDuration(BitwigModel.put(end - at));
+                            back.setTitle(clip.getTitle());
+                            clip.setDuration(BitwigModel.put(at - start));
+                            track.clipTimeline().addEvent(back);
+                        } finally {
+                            mInternals.end(mModel.dig);
+                        }
+                    }
+                    case "clip-dur", "clip-move", "clip-note", "clip-trim", "clip-loop" -> {
                         // Bitwig 側の編集（テスト用）: clip-dur トラック名 開始 長さ / clip-move トラック名 開始 新しい開始
-                        // / clip-note トラック名 開始 音程 位置 長さ
+                        // / clip-note トラック名 開始 音程 位置 長さ / clip-trim トラック名 開始 新しい開始（左端を動かす）
+                        // / clip-loop トラック名 開始 on|off ループ開始 ループ終わり
                         var track = findTrack(root, a[1]);
                         com.bitwig.extension.api.project.timeline.Clip clip = null;
                         for (Object e : track.clipTimeline().getEvents())
@@ -264,8 +346,24 @@ public class BridgeExtension extends ControllerExtension {
                         mInternals.begin(mModel.dig, "AbletonMulti test");
                         try {
                             switch (a[0]) {
-                                case "clip-dur" -> clip.setDuration(Double.parseDouble(a[3]));
-                                case "clip-move" -> clip.setTime(Double.parseDouble(a[3]));
+                                case "clip-dur" -> clip.setDuration(BitwigModel.put(Double.parseDouble(a[3])));
+                                case "clip-move" -> clip.setTime(BitwigModel.put(Double.parseDouble(a[3])));
+                                case "clip-trim" -> {
+                                    // 左端を動かす: 位置と中身の再生開始位置を同じだけずらし、長さを縮める（UI で左端をつかむのと同じ）
+                                    double d = Double.parseDouble(a[3]) - clip.getTime();
+                                    double offset = BitwigModel.round(clip.getPlayStartOffset() + d);
+                                    double end = BitwigModel.round(clip.getTime() + clip.getDuration());
+                                    clip.setPlayStartOffset(BitwigModel.put(offset));
+                                    clip.setTime(BitwigModel.put(Double.parseDouble(a[3])));
+                                    clip.setDuration(BitwigModel.put(end - Double.parseDouble(a[3])));
+                                }
+                                case "clip-loop" -> {
+                                    clip.setIsLoopEnabled(a[3].equals("on"));
+                                    if (a.length > 5) {
+                                        clip.setLoopStart(BitwigModel.put(Double.parseDouble(a[4])));
+                                        clip.setLoopDuration(BitwigModel.put(Double.parseDouble(a[5]) - Double.parseDouble(a[4])));
+                                    }
+                                }
                                 default -> {
                                     var f = (com.bitwig.extension.api.project.Factory) mApi.getClass().getMethod("getFactory").invoke(mApi);
                                     clip.getContent().getEventTimeline().addEvent(f.createInstrumentNote(0, Integer.parseInt(a[3]),
@@ -318,7 +416,11 @@ public class BridgeExtension extends ControllerExtension {
                                     sb.append("  note ").append(dumpFields(Internals.target(n), 1)).append('\n');
                             }
                         }
-                        try (FileOutputStream f = new FileOutputStream(new File(LOG_DIR, a.length > 1 ? a[1] : "fields.txt"))) {
+                        String name = a.length > 1 ? a[1] : "fields.txt";
+                        // LOG_DIR の外に書けないように、ファイル名だけを受け付ける
+                        if (name.contains("/") || name.contains("\\") || name.contains("..") || name.contains(":"))
+                            throw new IllegalArgumentException("bad file name: " + name);
+                        try (FileOutputStream f = new FileOutputStream(new File(LOG_DIR, name))) {
                             f.write(sb.toString().getBytes(StandardCharsets.UTF_8));
                         }
                     }
@@ -388,7 +490,7 @@ public class BridgeExtension extends ControllerExtension {
 
     /** 調査用: LOG_DIR に "debug" というファイルがあれば、今の状態を state.json に書き出す。 */
     private void debugDump() {
-        if (mModel == null || !new File(LOG_DIR, "debug").exists()) return;
+        if (mModel == null || !debugEnabled()) return;
         try (FileOutputStream f = new FileOutputStream(new File(LOG_DIR, "state.json"))) {
             f.write(Json.write(mModel.lastState()).getBytes(StandardCharsets.UTF_8));
         } catch (IOException ignored) {
@@ -415,8 +517,18 @@ public class BridgeExtension extends ControllerExtension {
         if (msg == null) return false;
         String kind = Json.str(msg.get("t"));
         if (kind == null) return false;
+        if (!mGreeted && !kind.equals("busy")) {
+            mGreeted = true;
+            mBusyShown = false;
+            mPopup = "AbletonMulti: アプリに接続しました";
+        }
         switch (kind) {
             case "apply" -> {
+                if (mAwaitResync) {
+                    // 前のプロジェクトに向けた変更（id が合わない）。アプリが合わせ直すのを待つ
+                    log("ignored apply before re-sync");
+                    return false;
+                }
                 flushLocal(true);
                 List<Object> ops = Json.list(msg.get("ops"));
                 if (ops == null) return false;
@@ -439,12 +551,23 @@ public class BridgeExtension extends ControllerExtension {
                     if (waiting != null && waiting.isEmpty()) mPending.remove(key);
                 }
             }
-            case "reset" -> mPending.clear();
+            case "reset" -> {
+                mPending.clear();
+                mModel.clearDeferred();
+            }
+            case "busy" -> {
+                // 同じ PC で別の DAW が先にアプリにつながっている。つなぎ直しながら待つ
+                if (!mBusyShown) mPopup = "AbletonMulti: ほかの DAW（" + Json.str(msg.get("daw")) + "）がアプリにつながっているので待っています";
+                mBusyShown = true;
+                mGreeted = true;
+            }
             case "snapshot_req" -> {
+                mAwaitResync = false;
                 flushLocal(true);
                 send(Json.obj("t", "snapshot", "id", msg.get("id"), "ops", mModel.snapshot()));
             }
             case "blank" -> {
+                mAwaitResync = false;
                 mInternals.begin(mModel.dig, "AbletonMulti: まっさらにする");
                 try {
                     mModel.makeBlank();
@@ -456,6 +579,7 @@ public class BridgeExtension extends ControllerExtension {
                 return true;
             }
             case "adopt" -> {
+                mAwaitResync = false;
                 Map<String, Object> map = Json.map(msg.get("map"));
                 mModel.adopt(map == null ? Map.of() : map);
                 mModel.collectChanges();
@@ -470,13 +594,14 @@ public class BridgeExtension extends ControllerExtension {
         mConnected = true;
         mPending.clear();
         sendHello();
-        mPopup = "AbletonMulti: アプリに接続しました";
+        mGreeted = false;  // 「接続しました」は、アプリから返事が来てから出す（待たされることがあるので）
     }
 
     private void onDisconnected() {
         if (mConnected) mPopup = "AbletonMulti: アプリとの接続が切れました";
         mConnected = false;
         mPending.clear();
+        if (mModel != null) mModel.clearDeferred();
     }
 
     private void sendHello() {
@@ -502,6 +627,11 @@ public class BridgeExtension extends ControllerExtension {
 
     private void networkLoop() {
         while (mRunning) {
+            if (mBroken) {
+                // 対応していない Bitwig ではつながない（直ったら mainTick が mBroken を戻す）
+                sleep(1000);
+                continue;
+            }
             Socket socket = new Socket();
             boolean opened = false;
             try {
@@ -518,12 +648,16 @@ public class BridgeExtension extends ControllerExtension {
                     if (line.isBlank()) continue;
                     try {
                         mInbox.add(Json.parse(line));
-                    } catch (RuntimeException e) {
+                    } catch (RuntimeException | StackOverflowError e) {
+                        // 深すぎる入れ子の JSON などは読まずに捨てる
                         log("bad message: " + e);
                     }
                 }
             } catch (IOException ignored) {
                 // アプリが起動していない、または切れた
+            } catch (Throwable t) {
+                // 思わぬエラーでも、このスレッドが止まるとつなぎ直せなくなるので続ける
+                log("network error: " + stack(t));
             } finally {
                 mSocket = null;
                 mOut = null;
@@ -544,13 +678,18 @@ public class BridgeExtension extends ControllerExtension {
     private static int appPort() {
         try {
             File file = new File(LOG_DIR, "port");
-            if (file.exists() && new File(LOG_DIR, "debug").exists()) {
+            if (debugEnabled() && file.exists()) {
                 String[] a = java.nio.file.Files.readString(file.toPath()).trim().split(" +");
                 if (a.length == 2 && System.currentTimeMillis() < Long.parseLong(a[1])) return Integer.parseInt(a[0]);
             }
         } catch (IOException | RuntimeException ignored) {
         }
         return APP_PORT;
+    }
+
+    /** 調査用の仕組みを使うか（環境変数 ABLETONMULTI_DEBUG=1 で、LOG_DIR に debug というファイルがあるとき）。 */
+    private static boolean debugEnabled() {
+        return DEBUG_ENV && new File(LOG_DIR, "debug").exists();
     }
 
     private void writeLoop() {

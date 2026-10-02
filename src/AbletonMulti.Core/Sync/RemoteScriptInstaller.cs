@@ -15,24 +15,50 @@ public static class RemoteScriptInstaller
     /// <summary>この PC に Ableton Live がありそうか（Live の設定フォルダがあるか）。</summary>
     public static bool IsLivePresent()
     {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var root = OperatingSystem.IsWindows()
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Ableton")
-            : Path.Combine(home, "Library", "Preferences", "Ableton");
-        return Directory.Exists(root) && Directory.GetDirectories(root, "Live *").Length > 0;
+        try
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var root = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Ableton")
+                : Path.Combine(home, "Library", "Preferences", "Ableton");
+            return Directory.Exists(root) && Directory.GetDirectories(root, "Live *").Length > 0;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            // 調べられないときは「ありそう」とする（入れるボタンが出るだけなので害はない）
+            return true;
+        }
     }
 
     public static ScriptInstallState GetState()
     {
-        var dir = ScriptDirectory;
-        if (!File.Exists(Path.Combine(dir, "__init__.py"))) return ScriptInstallState.NotInstalled;
-        foreach (var (name, content) in EmbeddedFiles())
+        try
         {
-            var path = Path.Combine(dir, name);
-            if (!File.Exists(path) || !File.ReadAllBytes(path).AsSpan().SequenceEqual(content))
-                return ScriptInstallState.Outdated;
+            var dir = ScriptDirectory;
+            if (!File.Exists(Path.Combine(dir, "__init__.py"))) return ScriptInstallState.NotInstalled;
+            foreach (var (name, content) in EmbeddedFiles())
+            {
+                var path = Path.Combine(dir, name);
+                if (!File.Exists(path) || !File.ReadAllBytes(path).AsSpan().SequenceEqual(content))
+                    return InstalledIsNewer(dir) ? ScriptInstallState.Installed : ScriptInstallState.Outdated;
+            }
+            return ScriptInstallState.Installed;
         }
-        return ScriptInstallState.Installed;
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            // 読めないときは入れ直してもらう（ボタンから入れ直せば直ることが多い）
+            return ScriptInstallState.Outdated;
+        }
+    }
+
+    /// <summary>入っているスクリプトの方が、このアプリに入っているものより新しい（古いアプリで上書きして戻さない）。</summary>
+    private static bool InstalledIsNewer(string dir)
+    {
+        const string pattern = "SCRIPT_VERSION\\s*=\\s*\"([^\"]+)\"";
+        var path = Path.Combine(dir, "multi.py");
+        var embedded = EmbeddedFiles().FirstOrDefault(f => f.Name == "multi.py").Content;
+        if (!File.Exists(path) || embedded is null) return false;
+        return AppInfo.Compare(AppInfo.FindVersion(File.ReadAllBytes(path), pattern), AppInfo.FindVersion(embedded, pattern)) > 0;
     }
 
     public static string Install()

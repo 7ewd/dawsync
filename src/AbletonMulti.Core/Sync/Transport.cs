@@ -14,6 +14,12 @@ public interface IMessageConnection : IAsyncDisposable
 {
     void Send(JsonObject message);
     IAsyncEnumerable<JsonObject> ReadAllAsync(CancellationToken ct = default);
+
+    /// <summary>1 つのメッセージの大きさの上限（超えたら切る）。参加を認める前は小さくしておく。</summary>
+    int MaxMessageBytes { get; set; }
+
+    /// <summary>送信待ちが maxQueued 個以下になるまで待つ（大きなファイルを送るとき、メモリに全部積まないように）。</summary>
+    ValueTask WaitForSpaceAsync(int maxQueued, CancellationToken ct);
 }
 
 /// <summary>
@@ -27,6 +33,8 @@ public sealed class WebSocketConnection : IMessageConnection
     private readonly Channel<string> _outbox = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _writer;
+    private int _queued;
+    private int _disposed;
 
     public WebSocketConnection(WebSocket socket, IDisposable? owner = null)
     {
@@ -35,7 +43,32 @@ public sealed class WebSocketConnection : IMessageConnection
         _writer = Task.Run(WriteLoopAsync);
     }
 
-    public void Send(JsonObject message) => _outbox.Writer.TryWrite(message.ToJsonString());
+    public int MaxMessageBytes { get; set; } = int.MaxValue;
+
+    public void Send(JsonObject message)
+    {
+        if (Interlocked.Increment(ref _queued) > Transport.MaxQueuedMessages)
+        {
+            Abort();  // 相手が受け取れていない。溜め続けるとメモリを食うので切る
+            return;
+        }
+        if (!_outbox.Writer.TryWrite(message.ToJsonString())) Interlocked.Decrement(ref _queued);
+    }
+
+    public async ValueTask WaitForSpaceAsync(int maxQueued, CancellationToken ct)
+    {
+        while (Volatile.Read(ref _queued) > maxQueued)
+        {
+            if (_cts.IsCancellationRequested) throw new IOException("接続が切れました");
+            await Task.Delay(5, ct);
+        }
+    }
+
+    private void Abort()
+    {
+        try { _cts.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
 
     public async IAsyncEnumerable<JsonObject> ReadAllAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -55,6 +88,7 @@ public sealed class WebSocketConnection : IMessageConnection
             }
             if (result.MessageType == WebSocketMessageType.Close) yield break;
             message.Write(buffer, 0, result.Count);
+            if (message.Length > MaxMessageBytes) yield break;  // 大きすぎるメッセージでメモリを食いつぶさない
             if (!result.EndOfMessage) continue;
 
             JsonObject? parsed = null;
@@ -70,13 +104,20 @@ public sealed class WebSocketConnection : IMessageConnection
         try
         {
             await foreach (var text in _outbox.Reader.ReadAllAsync(_cts.Token))
+            {
                 await _socket.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, _cts.Token);
+                Interlocked.Decrement(ref _queued);
+            }
         }
-        catch (Exception e) when (e is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException) { }
+        catch (Exception e) when (e is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            Abort();  // 送れなくなったら読む方も止める（相手からは切断に見える）
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         _outbox.Writer.TryComplete();
         await Task.WhenAny(_writer, Task.Delay(500));
         try
@@ -88,16 +129,34 @@ public sealed class WebSocketConnection : IMessageConnection
             }
         }
         catch (Exception e) when (e is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException) { }
-        await _cts.CancelAsync();
+        Abort();
         _socket.Dispose();
         _owner?.Dispose();
-        _cts.Dispose();
     }
 }
 
 public static class Transport
 {
     private static readonly TimeSpan KeepAlive = TimeSpan.FromSeconds(20);
+
+    /// <summary>送信待ちがこれを超えたら、相手が受け取れていないとみなして切る</summary>
+    public const int MaxQueuedMessages = 50_000;
+
+    /// <summary>
+    /// TCP のキープアライブ。相手の PC がスリープした・Wi-Fi が変わったなどで無言で切れた接続に、
+    /// 30 秒ほどで気づけるようにする（気づかないと、つなぎ直しが始まらない）。
+    /// </summary>
+    public static void EnableKeepAlive(Socket socket)
+    {
+        try
+        {
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 15);
+            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
+            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
+        }
+        catch (Exception e) when (e is SocketException or PlatformNotSupportedException or ObjectDisposedException) { }
+    }
 
     /// <summary>
     /// アドレスに接続する。
@@ -111,13 +170,29 @@ public static class Transport
         {
             var socket = new ClientWebSocket();
             socket.Options.KeepAliveInterval = KeepAlive;
-            await socket.ConnectAsync(uri, cts.Token);
+            try
+            {
+                await socket.ConnectAsync(uri, cts.Token);
+            }
+            catch
+            {
+                socket.Dispose();  // つなぎ直しで何度も失敗しても、ソケットを残さない
+                throw;
+            }
             return new WebSocketConnection(socket);
         }
 
         var (host, port) = SplitHostPort(address);
         var tcp = new TcpClient();
-        await tcp.ConnectAsync(host, port, cts.Token);
+        try
+        {
+            await tcp.ConnectAsync(host, port, cts.Token);
+        }
+        catch
+        {
+            tcp.Dispose();
+            throw;
+        }
         return new JsonLineConnection(tcp);
     }
 
@@ -137,8 +212,19 @@ public static class Transport
 
     public static (string Host, int Port) SplitHostPort(string address)
     {
+        address = address.Trim();
+        // [IPv6]:ポート
+        if (address.StartsWith('[') && address.IndexOf(']') is var close and > 0)
+        {
+            var host = address[1..close];
+            return address.Length > close + 2 && address[close + 1] == ':' && int.TryParse(address[(close + 2)..], out var p)
+                ? (host, p)
+                : (host, RoomServer.DefaultPort);
+        }
+        // コロンが 2 つ以上なら IPv6 のアドレスだけ（ポートなし）
+        if (address.Count(c => c == ':') > 1) return (address, RoomServer.DefaultPort);
         var colon = address.LastIndexOf(':');
-        return colon > 0 && int.TryParse(address[(colon + 1)..], out var port)
+        return colon > 0 && int.TryParse(address[(colon + 1)..], out var port) && port is > 0 and < 65536
             ? (address[..colon], port)
             : (address, RoomServer.DefaultPort);
     }

@@ -10,7 +10,7 @@ import com.bitwig.extension.controller.api.ControllerHost;
 
 /** Bitwig の「コントローラー」として追加すると、同じ PC の AbletonMulti アプリとつながる。 */
 public class BridgeDefinition extends ControllerExtensionDefinition {
-    static final String VERSION = "0.1.0";
+    static final String VERSION = "0.6.2";
 
     @Override public String getName() { return "AbletonMulti"; }
     @Override public String getAuthor() { return "AbletonMulti"; }

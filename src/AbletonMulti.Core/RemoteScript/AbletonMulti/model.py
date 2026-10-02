@@ -22,6 +22,8 @@
 import os
 import random
 
+import collections
+
 import Live
 
 NOTE_TIME_SPAN = 1000000.0
@@ -212,6 +214,7 @@ class Model(object):
         self.needs_rebuild = False
         self._resolve_pending_loads()
         old_keys = set(self.bindings)
+        old_clips = dict((k, _ptr(c)) for k, c in self._clip_by_key.items())
         self._unbind()
         self.bindings = {}
         self._objects = {}
@@ -227,6 +230,28 @@ class Model(object):
         self._baseline_next = False
         new_keys = set(self.bindings) - old_keys
         gone = old_keys - set(self.bindings)
+        # 同じ位置（キー）のまま、クリップが別のものに置き換わった（分割した前半など）。中身が変わっているかもしれないので見直す
+        replaced = set(k for k, c in self._clip_by_key.items() if k in old_clips and old_clips[k] != _ptr(c))
+
+        # 相手の変更を反映した結果、そのまとまりに無いクリップが切り分けられた・消えた（Live は重なったクリップを
+        # 切り詰める）。相手の DAW（Bitwig など）は重なったまま置いておくので、こちらの結果を送って揃える
+        applying = getattr(self, "_applying", None)
+        if announce and not baseline:
+            self.dirty.update(replaced)
+        if baseline and not announce and applying is not None:
+            self.dirty.update(k for k in replaced if k not in applying)
+            for k in new_keys:
+                if k.startswith("c/") and k not in applying:
+                    self.dirty.add(k)
+            for k in gone:
+                parts = k.split("/")
+                if k.startswith("c/") and k not in applying and self.last.get(k) is not None                         and ("t/" + parts[2]) in self.bindings:
+                    self.removed.add(k)
+            new_keys = set(k for k in new_keys if k not in self.dirty)
+            # 同じ位置のまま切り詰められたクリップもあるので、触ったトラックのほかのクリップも見直す（変わっていれば送る）
+            touched = set(k.split("/")[2] for k in applying if k and k.startswith("c/") and k.count("/") == 3)
+            self.dirty.update(k for k in self.bindings
+                              if k.startswith("c/") and k not in applying and k.split("/")[2] in touched)
 
         if baseline:
             for k in new_keys:
@@ -399,9 +424,16 @@ class Model(object):
                                 "相手がトラック「%s」のグループ分けを変えました。Live の制限で自動では変えられないので、"
                                 "同じようにグループに入れる／出すと、自動でつながります" % obj.name)
         pos = self._target_index(coll, i, o)
-        if prefix == "t" and obj is not None and value.get("k") in ("midi", "audio")                 and self._describe_track(obj).get("k") != value.get("k"):
-            self._recreate_track(coll, obj, i, pos, value)
-            return
+        if prefix == "t" and obj is not None and value.get("k") in ("midi", "audio") \
+                and self._describe_track(obj).get("k") != value.get("k"):
+            if _track_has_content(obj):
+                # 作り直すと、こちらで入れた音源・エフェクト・ミキサーの設定（同期していないもの）が消えてしまう
+                self._warn_once("kind:%s:%s" % (i, value.get("k")),
+                                "相手のトラック「%s」は%sトラックですが、こちらのトラックには中身があるので作り直しませんでした"
+                                % (obj.name, "MIDI " if value.get("k") == "midi" else "オーディオ"))
+            else:
+                self._recreate_track(coll, obj, i, pos, value)
+                return
         if obj is None:
             created = coll.create(pos, value)
             if created is not None:
@@ -553,7 +585,7 @@ class Model(object):
                     self._order[gid] = float(value.get("o", 0.0))
                     self.last["t/" + gid] = dict(value)
                     del self._pending_groups[gid]
-                    self.warn("グループをつなぎました。これからはグループの名前や音量も同期されます")
+                    self.warn("グループをつなぎました。これからはグループの名前なども同期されます")
                     break
 
     def _create_track(self, pos, value):
@@ -828,14 +860,29 @@ class Model(object):
                 self.needs_rebuild = True
                 return
             current = _read_clip(clip)
-            if isinstance(v.get("delta"), dict) and v.get("k") == current["k"]:
+            if isinstance(v.get("delta"), dict):
+                if v.get("k") != current["k"]:
+                    # 種類（MIDI / オーディオ）が変わる前のクリップへの編集。ノート全部が付いていないので、
+                    # これでは作り直せない（サーバー・ほかの DAW も同じく無視する）
+                    return
                 v = merge_delta(current, v)
             if v.get("k") != current["k"] or (v["k"] == "audio" and _norm_path(v.get("file")) != _norm_path(current.get("file"))) \
-                    or (v["k"] == "midi" and v.get("dur") is not None and v.get("dur") != current.get("dur")):
-                # 種類やサンプルが変わった → 作り直す
+                    or (v.get("dur") is not None and current.get("dur") is not None and v.get("dur") != current.get("dur")):
+                # 種類やサンプル・長さが変わった → 作り直す（アレンジメントのクリップの長さは API で変えられない）
                 delete()
-                self._create_clip(key, v)
                 self.needs_rebuild = True
+                try:
+                    created = self._create_clip(key, v)
+                except Exception:  # noqa: BLE001
+                    created = False
+                if not created:
+                    # 作れなかった（トラックの種類が違う・ファイルが無い等）。消えたままだと自分だけクリップが無くなり、
+                    # しかもその削除が相手に送られてしまうので、元のクリップを作り直して戻す
+                    self.log("failed to recreate clip %s, restoring" % key)
+                    try:
+                        self._create_clip(key, current)
+                    except Exception:  # noqa: BLE001
+                        self._remember_orphan(key, v)
                 return
             if v["k"] == "midi" and v.get("n") != current.get("n"):
                 _write_notes(clip, v.get("n", []))
@@ -854,8 +901,23 @@ class Model(object):
         track = self._objects.get(parts[2])
         if track is None or not hasattr(track, "clip_slots") or value is None:
             return False
+        old_key = getattr(self, "_moves", {}).get(key)
+        if old_key is not None:
+            if self._move_clip(key, value, old_key):
+                return True
+            old = self._clip_by_key.get(old_key)
+            if old is not None:
+                # 複製できなかった → 元を消して作り直す（元を残すと切れ端になる）
+                try:
+                    self._objects.get(old_key.split("/")[2]).delete_clip(old)
+                except Exception:
+                    pass
         kind = value.get("k")
         if (kind == "midi") != bool(track.has_midi_input):
+            self._warn_once("kind:" + parts[2] + ":" + str(kind),
+                            "「%s」は%sトラックなので、相手の%sクリップは置けませんでした"
+                            % (track.name, "MIDI " if track.has_midi_input else "オーディオ",
+                               "MIDI " if kind == "midi" else "オーディオ"))
             return False
         if kind == "audio" and not value.get("file"):
             self._warn_once("nofile:" + key, "サンプルファイルが届いていないのでクリップを作れませんでした")
@@ -883,6 +945,8 @@ class Model(object):
                 clip = track.create_audio_clip(value["file"], start)
             if clip is None:
                 clip = next((c for c in track.arrangement_clips if abs(c.start_time - start) < 1e-4), None)
+            if kind == "audio" and clip is not None and value.get("dur"):
+                _set_audio_length(clip, value)
         if clip is None:
             return False
         self._note_created(clip)
@@ -903,6 +967,11 @@ class Model(object):
             waiting = pending.get(key) or []
             if force or not waiting:
                 kept.append(o)
+            elif value is None:
+                # 相手の削除（サーバーには自分の編集より先に届いた）。自分の変更がノートなどの部分的な編集だけなら、
+                # その編集はサーバーで「無いクリップへの編集」として捨てられるので、削除を反映する
+                if "*" not in set().union(*waiting):
+                    kept.append(o)
             elif isinstance(value, dict) and isinstance(value.get("delta"), dict):
                 mine = set().union(*waiting)
                 if "*" in mine:
@@ -984,7 +1053,6 @@ class Model(object):
                 # トラックを作ると Live はそちらを選んで、下の画面もデバイスに切り替える。ノートの画面に戻す
                 app_view = Live.Application.get_application().view
                 app_view.show_view("Detail/Clip")
-                app_view.focus_view("Detail/Clip")
         except Exception:
             pass
         return changed
@@ -1077,18 +1145,103 @@ class Model(object):
             deletions_first = priority(key) != 0
             return (priority(key), (value is not None) if deletions_first else (value is None), order, key)
 
-        for op in sorted(ops, key=sort_key):
-            key, value = op.get("k"), op.get("v")
-            self._apply_one(key, value)
-            self.dirty.discard(key)
+        self._find_moves(ops)
+        self._applying = set(o.get("k") for o in ops)
+        try:
+            for op in sorted(ops, key=sort_key):
+                key, value = op.get("k"), op.get("v")
+                self._apply_one(key, value)
+                self.dirty.discard(key)
+            if self.needs_rebuild:
+                self.rebuild(announce=False)
+                for key in self._applying:
+                    if key in self.bindings and key.startswith("c/"):
+                        self.last[key] = self.read(key)
+                        self.dirty.discard(key)
+        finally:
+            self._moves, self._moved_away = {}, set()
+            self._applying = None
+
+    # ------------------------------------------------ クリップの移動
+    #
+    # 相手がクリップを動かすと「元の位置のキーを消す」「新しい位置のキーを作る」の 2 つが届く。
+    # そのまま消して作り直すと、クリップの中のエンベロープや MPE（同期していない情報）が消えてしまうので、
+    # 消す 1 つと作る 1 つが組になっていたら、duplicate_clip_to_arrangement でクリップごと複製してから元を消す。
+
+    def _find_moves(self, ops):
+        self._moves, self._moved_away = {}, set()
+        removed, added = {}, {}
+        for op in ops:
+            parts = op.get("k", "").split("/")
+            if len(parts) != 4 or parts[0] != "c" or parts[1] != "a":
+                continue
+            if op.get("v") is None and op["k"] in self._clip_by_key:
+                removed.setdefault(parts[2], []).append(op["k"])
+            elif op.get("v") is not None and op["k"] not in self._clip_by_key:
+                added.setdefault(parts[2], []).append(op["k"])
+        pairs = [(r[0], added[t][0]) for t, r in removed.items() if len(r) == 1 and len(added.get(t, [])) == 1]
+        if not pairs and sum(len(r) for r in removed.values()) == 1 and sum(len(a) for a in added.values()) == 1:
+            # 別のトラックへ動かした
+            pairs = [(list(removed.values())[0][0], list(added.values())[0][0])]
+        for old, new in pairs:
+            self._moves[new] = old
+            self._moved_away.add(old)
+
+    def _move_clip(self, key, value, old_key):
+        """old_key のクリップを key の位置へ複製して元を消す。できなかったら False（そのときは作り直す）。"""
+        clip = self._clip_by_key.get(old_key)
+        parts = key.split("/")
+        track = self._objects.get(parts[2])
+        old_track = self._objects.get(old_key.split("/")[2])
+        if clip is None or track is None or old_track is None or not hasattr(track, "duplicate_clip_to_arrangement"):
+            return False
+        try:
+            current = _read_clip(clip)
+            if current.get("k") != value.get("k") or current.get("dur") != value.get("dur") \
+                    or (value.get("k") == "audio" and _norm_path(current.get("file")) != _norm_path(value.get("file"))):
+                return False  # 長さや中身の種類も変わった → 作り直す
+            old_start, old_end = clip.start_time, clip.end_time
+            start = float(parts[3])
+            moved = track.duplicate_clip_to_arrangement(clip, start)
+            if moved is None:
+                moved = next((c for c in track.arrangement_clips if abs(c.start_time - start) < 1e-4), None)
+            if moved is None:
+                return False
+            # 元のクリップ（重なって切り分けられた切れ端も）を消す
+            for c in list(old_track.arrangement_clips):
+                if _ptr(c) != _ptr(moved) and c.start_time >= old_start - 1e-6 and c.end_time <= old_end + 1e-6:
+                    old_track.delete_clip(c)
+            self._note_created(moved)
+            if value.get("k") == "midi" and value.get("n") != current.get("n"):
+                _write_notes(moved, value.get("n", []))
+            _write_clip_props(moved, value.get("p", {}), current.get("p", {}))
+            return True
+        except Exception:
+            self.log("failed to move clip %s -> %s" % (old_key, key))
+            return False
 
     def _apply_one(self, key, value):
         if _is_local_only(key):
             return  # 古いバージョンの相手から届いても反映しない
+        if value is None and key in getattr(self, "_moved_away", ()):
+            return  # 動かしたクリップの元の位置は、移動先を作るときに消す
+        if key in self._orphans:
+            # まだ置けていない（トラックが無い等）クリップへの続きの変更。削除なら忘れ、編集なら覚えている値に重ねる
+            if value is None:
+                self._orphans.pop(key, None)
+                return
+            if isinstance(value, dict) and isinstance(value.get("delta"), dict) and isinstance(self._orphans[key], dict):
+                self._orphans[key] = merge_delta(self._orphans[key], value)
+                return
+            self._orphans.pop(key, None)
         try:
             binding = self.bindings.get(key)
             if binding is not None:
                 binding[1](value)
+            elif key.startswith("c/") and isinstance(value, dict) and isinstance(value.get("delta"), dict)                     and key not in getattr(self, "_moves", {}):
+                # 無いクリップへの編集（相手が編集している間に、こちらで消した・動かした）。サーバーと同じく反映しない
+                # （反映すると、動かしたクリップが元の位置にも戻ってきて 2 つになる）
+                return
             elif key.startswith("c/") and value is not None:
                 if not self._create_clip(key, value):
                     self._remember_orphan(key, value)
@@ -1099,7 +1252,9 @@ class Model(object):
             elif value is not None:
                 self._remember_orphan(key, value)
                 return
-            if self.needs_rebuild:
+            # 新しくクリップを作っただけなら、読み直しはこのまとまりの最後に 1 回だけ行う（_apply_ops）
+            created_only = binding is None and key.startswith("c/") and getattr(self, "_applying", None) is not None
+            if self.needs_rebuild and not created_only:
                 self.rebuild(announce=False)
             self.last[key] = self.read(key) if key in self.bindings else None if value is None else value
         except Exception:
@@ -1118,9 +1273,18 @@ class Model(object):
         if not self._orphans:
             return
         ready = sorted((k for k in self._orphans if k in self.bindings or self._orphan_ready(k)), key=priority)
-        for key in ready:
-            value = self._orphans.pop(key)
-            self._apply_one(key, value)
+        if not ready:
+            return
+        # 相手の変更を反映したものなので、反映でできたクリップを「こちらの変更」として送り返さない
+        outer = getattr(self, "_applying", None)
+        self._applying = set(ready) if outer is None else outer | set(ready)
+        try:
+            for key in ready:
+                value = self._orphans.pop(key)
+                self._apply_one(key, value)
+                self.dirty.discard(key)
+        finally:
+            self._applying = outer
 
     def _orphan_ready(self, key):
         parts = key.split("/")
@@ -1220,14 +1384,24 @@ def _note_ident(row):
 
 def _row_diff(new_rows, old_rows):
     """new にあって old に無いノートと、old にあって new に無いノート（同じノートが複数あっても数える）。"""
-    old = [tuple(_full_row(r)) for r in old_rows]
+    old = collections.Counter(tuple(_full_row(r)) for r in old_rows)
     added = []
     for r in (tuple(_full_row(r)) for r in new_rows):
-        if r in old:
-            old.remove(r)
+        if old[r] > 0:
+            old[r] -= 1
         else:
             added.append(list(r))
-    return added, [list(r) for r in old]
+    return added, [list(r) for r, count in old.items() for _ in range(count)]
+
+
+# 同じノートか。REAPER は 1 拍 960 の目盛りに丸めるので、その 1 目盛りくらいの差は同じとみなす
+# （サーバー・Bitwig・REAPER と同じ規則。違うと、相手が動かした・消したノートが残って複製になる）
+NOTE_TOLERANCE = 0.002
+
+
+def _same_note(a, b):
+    return int(a[0]) == int(b[0]) and abs(float(a[1]) - float(b[1])) <= NOTE_TOLERANCE \
+        and abs(float(a[2]) - float(b[2])) <= NOTE_TOLERANCE
 
 
 def with_delta(key, value, previous):
@@ -1244,18 +1418,23 @@ def with_delta(key, value, previous):
 
 
 def apply_row_delta(rows, added, removed):
-    result = [list(_full_row(r)) for r in rows]
+    by_pitch = {}
+    for r in rows:
+        row = list(_full_row(r))
+        by_pitch.setdefault(int(row[0]), []).append(row)
     for r in removed or []:
-        ident = _note_ident(r)
-        for n, x in enumerate(result):
-            if _note_ident(x) == ident:
-                del result[n]
+        row = _full_row(r)
+        bucket = by_pitch.get(int(row[0]), [])
+        for n, x in enumerate(bucket):
+            if _same_note(x, row):
+                del bucket[n]
                 break
     for r in added or []:
-        ident = _note_ident(r)
-        result = [x for x in result if _note_ident(x) != ident]
-        result.append(list(_full_row(r)))
-    return sorted(result)
+        row = list(_full_row(r))
+        bucket = by_pitch.setdefault(int(row[0]), [])
+        bucket[:] = [x for x in bucket if not _same_note(x, row)]
+        bucket.append(row)
+    return sorted(x for bucket in by_pitch.values() for x in bucket)
 
 
 def merge_delta(current, incoming):
@@ -1333,6 +1512,27 @@ def _read_clip(clip):
     return dict({"k": "midi", "len": _round(clip.length), "n": rows, "p": props}, **extra)
 
 
+def _set_audio_length(clip, value):
+    """
+    オーディオクリップはファイルの長さで作られるので、アレンジメント上の長さ（dur）に合わせる。
+    ループを切っている間は「開始マーカー〜終了マーカー」がそのまま長さになるので、それで決めてから、
+    ループの設定（この後の _write_clip_props）を戻す。ワープしていない（秒で表す）クリップは合わせられない。
+    """
+    try:
+        if not clip.warping:
+            return
+        sm = float((value.get("p") or {}).get("sm", clip.start_marker))
+        clip.looping = False
+        if sm + float(value["dur"]) > clip.start_marker:
+            clip.end_marker = sm + float(value["dur"])
+            clip.start_marker = sm
+        else:
+            clip.start_marker = sm
+            clip.end_marker = sm + float(value["dur"])
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _write_clip_props(clip, props, current):
     table = dict((s, (a, c)) for s, a, c in CLIP_PROPS + AUDIO_PROPS)
     # ループ範囲は「開始 < 終了」を保ったまま動かす必要があるので、広げる方向から設定する
@@ -1360,6 +1560,18 @@ def _write_clip_props(clip, props, current):
                 pass
     if props.get("wmk") is not None and props.get("wmk") != current.get("wmk"):
         _write_warp_markers(clip, props["wmk"])
+
+
+def _track_has_content(track):
+    """デバイス・クリップのどれかがあるトラックか。"""
+    try:
+        if len(track.devices):
+            return True
+        if any(slot.has_clip for slot in track.clip_slots):
+            return True
+        return len(getattr(track, "arrangement_clips", ())) > 0
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _read_warp_markers(clip):
@@ -1429,6 +1641,8 @@ def _write_notes(clip, rows):
     want = {}
     for r in rows:
         r = _full_row(r)
+        if float(r[2]) <= 0:
+            continue  # 長さ 0 のノート（Bitwig の切れ端など）は Live に置けない
         want.setdefault((int(r[0]), _round(r[1]), _round(r[2])), []).append(r)
 
     if not hasattr(clip, "apply_note_modifications") or not hasattr(clip, "remove_notes_by_id"):

@@ -51,6 +51,11 @@ final class BitwigModel {
     }
 
     private static final double NOTE_EPS = 1e-6;
+    private static final double MIN_NOTE = 1.0 / 2048;
+    // 届いたノートを今のノートと同じとみなす位置・長さの違い（REAPER は 960 PPQ に丸めるので、最大 0.002 拍ほど違う）
+    private static final double NOTE_TOL = 0.002;
+    /** 調査用: 自分の変更が戻ってくるのを待っていて、相手の変更を無視・一部だけ反映したときにログに書く */
+    static volatile boolean trace;
 
     final Object dig;
     private final Project api;
@@ -203,7 +208,9 @@ final class BitwigModel {
         if (!(c instanceof NoteClip)) return null;
         List<List<Object>> rows = new ArrayList<>();
         for (Object o : content.getEvents())
-            if (o instanceof InstrumentNote n) rows.add(noteRow(n));
+            // 長さ 0 のノートは読まない（同じ音程のノートの中にノートを置くと、Bitwig は元のノートを分けて
+            // 長さ 0 の切れ端を残す。聞こえも見えもしないが、送ると相手とノートが食い違う）
+            if (o instanceof InstrumentNote n && n.getDuration() >= MIN_NOTE) rows.add(noteRow(n));
         rows.sort(ROW_ORDER);
         return Json.obj("k", "midi", "len", len, "n", new ArrayList<Object>(rows), "p", props, "dur", dur);
     }
@@ -325,6 +332,7 @@ final class BitwigModel {
 
     List<Map<String, Object>> snapshot() {
         Map<String, Object> state = readAll();
+        deferred.clear();  // 送り直すのは今の状態なので、後回しにしていた古い変更はもう反映しない
         last.clear();
         last.putAll(state);
         List<Map<String, Object>> ops = new ArrayList<>();
@@ -364,6 +372,7 @@ final class BitwigModel {
         unplaced.clear();
         used.addAll(ids.values());
         last.clear();
+        deferred.clear();  // 付け替える前の id の変更なので捨てる
         baselineNext = true;
     }
 
@@ -382,6 +391,7 @@ final class BitwigModel {
         for (Object o : root.effectTracks()) victims.add(Internals.target(o));
         in.delete(dig, victims);
         last.clear();
+        deferred.clear();  // まっさらにした後で、前の古いテンポなどを反映しないように
         baselineNext = true;
     }
 
@@ -405,9 +415,16 @@ final class BitwigModel {
             }
             Map<String, Object> value = Json.map(m.get("v"));
             Map<String, Object> delta = value == null ? null : Json.map(value.get("delta"));
-            if (delta == null) continue;
             Set<String> mine = new HashSet<>();
             for (Set<String> s : waiting) mine.addAll(s);
+            if (trace) out.log("pending " + key + " mine=" + mine + (m.get("v") == null ? " delete" : delta == null ? " skip (no delta)" : " delta.f=" + delta.get("f")));
+            if (m.get("v") == null) {
+                // 相手の削除（サーバーには自分の編集より先に届いた）。自分の変更がノートなどの部分的な編集だけなら、
+                // その編集はサーバーで「無いクリップへの編集」として捨てられるので、削除を反映する
+                if (!mine.contains("*")) ops.add(m);
+                continue;
+            }
+            if (delta == null) continue;
             if (mine.contains("*")) continue;
             List<Object> fields = new ArrayList<>();
             List<Object> changed = Json.list(delta.get("f"));
@@ -419,6 +436,8 @@ final class BitwigModel {
             ops.add(op(key, v2));
         }
         if (ops.isEmpty()) return;
+        Set<String> batchKeys = new HashSet<>();
+        for (Map<String, Object> op : ops) batchKeys.add((String) op.get("k"));
 
         readAll();
         for (Map<String, Object> op : ops) {
@@ -478,15 +497,24 @@ final class BitwigModel {
         moves.clear();
         movedAway.clear();
 
-        // 反映した結果を「最後の値」にする（送り返さない）。反映でできた新しいキーも同じ扱い
+        // 反映した結果を「最後の値」にする（送り返さない）。反映でできた新しいキーも同じ扱い。
+        // ただし、このまとまりに無いクリップが増えた・消えたのは、こちらで（Bitwig が少し遅れて）動いたもの
+        // なので取り込まず、次に送る（取り込むと、そのクリップの移動が相手に届かない）
         Map<String, Object> state = readAll();
         for (String key : applied) {
             if (state.containsKey(key)) last.put(key, state.get(key));
             else last.remove(key);
         }
         for (Map.Entry<String, Object> e : state.entrySet())
-            if (!last.containsKey(e.getKey())) last.put(e.getKey(), e.getValue());
-        last.keySet().removeIf(k -> !state.containsKey(k));
+            if (!last.containsKey(e.getKey()) && !(e.getKey().startsWith("c/") && !batchKeys.contains(e.getKey())))
+                last.put(e.getKey(), e.getValue());
+        last.keySet().removeIf(k -> !state.containsKey(k)
+                && !(k.startsWith("c/") && !batchKeys.contains(k) && state.containsKey("t/" + k.split("/")[2])));
+    }
+
+    /** 後回しにした変更を捨てる（接続が切れた・リセットされたとき。古いテンポなどを後から反映しないように）。 */
+    void clearDeferred() {
+        deferred.clear();
     }
 
     /** 前の tick で後回しにした変更があるか。 */
@@ -568,7 +596,7 @@ final class BitwigModel {
             if (!Json.same(vp == null ? null : vp.get(f), pp == null ? null : pp.get(f))) fields.add("p." + f);
         Map<String, Object> delta = Json.obj("f", fields);
         if ("midi".equals(v.get("k"))) {
-            List<Object> oldRows = new ArrayList<>();
+            NoteRows oldRows = new NoteRows();
             List<Object> prevRows = Json.list(p.get("n"));
             if (prevRows != null) for (Object r : prevRows) oldRows.add(fullRowOf(r));
             List<Object> added = new ArrayList<>();
@@ -576,21 +604,80 @@ final class BitwigModel {
             if (newRows != null)
                 for (Object r : newRows) {
                     List<Object> row = fullRowOf(r);
-                    int i = indexOfSame(oldRows, row);
-                    if (i >= 0) oldRows.remove(i);
-                    else added.add(row);
+                    if (!oldRows.removeSame(row)) added.add(row);
                 }
             delta.put("a", added);
-            delta.put("d", oldRows);
+            delta.put("d", oldRows.list());
         }
         Map<String, Object> out = new LinkedHashMap<>(v);
         out.put("delta", delta);
         return out;
     }
 
-    private static int indexOfSame(List<Object> rows, List<Object> row) {
-        for (int i = 0; i < rows.size(); i++) if (Json.same(rows.get(i), row)) return i;
-        return -1;
+    /**
+     * ノートの行の並び。音程・位置・長さ（丸めたもの）と音程で引けるようにして、同じノートを探すのを速くする
+     * （1 つずつ前から探すと、ノートの多いクリップで遅い）。消した行は印を付けるだけで、並びはそのまま。
+     */
+    private static final class NoteRows {
+        private final List<List<Object>> rows = new ArrayList<>();
+        private final java.util.BitSet removed = new java.util.BitSet();
+        private final Map<String, List<Integer>> byIdent = new HashMap<>();
+        private final Map<Integer, List<Integer>> byPitch = new HashMap<>();
+
+        int size() {
+            return rows.size();
+        }
+
+        void add(List<Object> row) {
+            int i = rows.size();
+            rows.add(row);
+            byIdent.computeIfAbsent(identOf(row), k -> new ArrayList<>()).add(i);
+            byPitch.computeIfAbsent((int) Json.num(row.get(0), 0), k -> new ArrayList<>()).add(i);
+        }
+
+        /** 中身がまったく同じ最初の行を消す。 */
+        boolean removeSame(List<Object> row) {
+            for (int i : byIdent.getOrDefault(identOf(row), List.of()))
+                if (!removed.get(i) && Json.same(rows.get(i), row)) {
+                    removed.set(i);
+                    return true;
+                }
+            return false;
+        }
+
+        /** 音程・位置・長さが同じ最初の行（all なら全部）を消す。 */
+        boolean removeIdent(List<Object> row, boolean all) {
+            boolean found = false;
+            for (int i : byIdent.getOrDefault(identOf(row), List.of()))
+                if (!removed.get(i)) {
+                    removed.set(i);
+                    found = true;
+                    if (!all) break;
+                }
+            return found;
+        }
+
+        /** 最初の limit 行のうち、同じ音程で位置・長さが少しだけずれた最初の行（all なら全部）を消す（NOTE_TOL を参照）。 */
+        boolean removeNear(List<Object> row, boolean all, int limit) {
+            double start = Json.num(row.get(1), 0), length = Json.num(row.get(2), 0);
+            boolean found = false;
+            for (int i : byPitch.getOrDefault((int) Json.num(row.get(0), 0), List.of())) {
+                if (i >= limit || removed.get(i)) continue;
+                List<Object> r = rows.get(i);
+                if (near(Json.num(r.get(1), 0), start) && near(Json.num(r.get(2), 0), length)) {
+                    removed.set(i);
+                    found = true;
+                    if (!all) break;
+                }
+            }
+            return found;
+        }
+
+        List<Object> list() {
+            List<Object> out = new ArrayList<>();
+            for (int i = 0; i < rows.size(); i++) if (!removed.get(i)) out.add(rows.get(i));
+            return out;
+        }
     }
 
     /** 今の値 current に、届いた値 incoming の delta（変わったところ）だけを重ねる。 */
@@ -616,28 +703,29 @@ final class BitwigModel {
                 }
             }
         if (delta.containsKey("a") || delta.containsKey("d")) {
-            List<Object> rows = new ArrayList<>();
+            NoteRows rows = new NoteRows();
             List<Object> currentRows = Json.list(current.get("n"));
             if (currentRows != null) for (Object r : currentRows) rows.add(fullRowOf(r));
+            int base = rows.size();
             List<Object> removed = Json.list(delta.get("d"));
-            if (removed != null)
+            if (removed != null) {
+                // 完全に同じものを先に消してから、ほかの DAW の丸めで少しずれたものを探す（ずれたものが横取りしないように）
+                List<List<Object>> rest = new ArrayList<>();
                 for (Object r : removed) {
-                    String ident = identOf(fullRowOf(r));
-                    for (int i = 0; i < rows.size(); i++)
-                        if (identOf(Json.list(rows.get(i))).equals(ident)) {
-                            rows.remove(i);
-                            break;
-                        }
+                    List<Object> row = fullRowOf(r);
+                    if (!rows.removeIdent(row, false)) rest.add(row);
                 }
+                for (List<Object> row : rest) rows.removeNear(row, false, base);
+            }
             List<Object> added = Json.list(delta.get("a"));
             if (added != null)
                 for (Object r : added) {
                     List<Object> row = fullRowOf(r);
-                    String ident = identOf(row);
-                    rows.removeIf(x -> identOf(Json.list(x)).equals(ident));
+                    // 置き換え。少しずれたものを探すのは今あった行だけ（この delta で足した行どうしは別のノート）
+                    if (!rows.removeIdent(row, true)) rows.removeNear(row, true, base);
                     rows.add(row);
                 }
-            result.put("n", rows);
+            result.put("n", rows.list());
         }
         result.remove("delta");
         return result;
@@ -681,7 +769,8 @@ final class BitwigModel {
                         return false;
                     }
                     if (!tracks.containsKey(parts[2])) {
-                        if (value != null) remember(key, value);
+                        // 無いクリップへの編集（delta）は、トラックができても反映しない（applyClip と同じ規則）
+                        if (value != null && Json.map(Json.map(value).get("delta")) == null) remember(key, value);
                         return false;
                     }
                     applyClip(parts[2], parts[3], Json.map(value));
@@ -728,6 +817,14 @@ final class BitwigModel {
         return api.getTrackGroup();
     }
 
+    /** id が gid そのもの、または gid を（何段か上で）入れているグループか。 */
+    private boolean isSelfOrAncestor(String id, String gid) {
+        int steps = 0;
+        for (String g = gid; g != null && steps <= parents.size(); g = parents.get(g), steps++)
+            if (g.equals(id)) return true;
+        return false;
+    }
+
     /** group の中で、並び順 o の id が入るべき位置。 */
     private int targetIndex(TrackGroup group, String id, double o) {
         OrderKey me = new OrderKey(o, id);
@@ -763,7 +860,8 @@ final class BitwigModel {
             // バウンスなどで種類が変わった → 作り直す
             TrackOrTrackGroup old = existing;
             ids.remove(Internals.target(old));
-            createTrack(id, kind, parent, o);
+            // 自分の中（子孫）のグループに作ると、古い方を消すときに一緒に消えるので外に置く
+            createTrack(id, kind, gid != null && isSelfOrAncestor(id, gid) ? api.getTrackGroup() : parent, o);
             in.delete(dig, List.of(Internals.target(old)));
             structuralDelete = true;
             last.keySet().removeIf(k -> k.startsWith("c/a/" + id + "/"));
@@ -777,7 +875,10 @@ final class BitwigModel {
         }
         String currentParent = parents.get(id);
         if (!java.util.Objects.equals(currentParent, gid == null || tracks.containsKey(gid) ? gid : null)) {
-            if (in.canMoveTracks()) {
+            if (gid != null && isSelfOrAncestor(id, gid)) {
+                // グループを自分の中（子孫）に入れると輪になり、読むたびに無限にたどってしまう。入れない
+                out.log("skip moving " + id + " into its own descendant " + gid);
+            } else if (in.canMoveTracks()) {
                 TrackGroup from = groupFor(currentParent);
                 in.moveTrack(parentInternal, Internals.target(from), Internals.target(existing), targetIndex(parent, id, o));
                 unplaced.remove(id);
@@ -810,14 +911,39 @@ final class BitwigModel {
         TrackGroup temp = factory.createTrackGroup();
         Object tempInternal = Internals.target(temp);
         in.insertTrack(parentInternal, tempInternal, parent.mainTracks().size());
+        structuralDelete = true;
         try {
             in.moveTrack(tempInternal, parentInternal, Internals.target(track), 0);
             in.moveTrack(parentInternal, tempInternal, Internals.target(track), pos);
         } finally {
-            in.delete(dig, List.of(tempInternal));
-            structuralDelete = true;
+            removeTempGroup(parent, temp);
         }
         return parent.mainTracks().indexOf(track) == pos;
+    }
+
+    /**
+     * 並べ替えの一時グループを消す。中にトラックが残っていたら（戻すのに失敗した）先に親へ出し、
+     * 出せなかったらグループごと残す（消すとユーザーのトラックまで消える）。
+     */
+    private void removeTempGroup(TrackGroup parent, TrackGroup temp) {
+        Object parentInternal = Internals.target(parent), tempInternal = Internals.target(temp);
+        try {
+            for (Object o : copyOf(temp.mainTracks()))
+                in.moveTrack(parentInternal, tempInternal, Internals.target(o), Math.max(0, indexOfInternal(parent, tempInternal)));
+        } catch (Throwable t) {
+            out.log("failed to move tracks out of the temporary group: " + t);
+        }
+        try {
+            if (temp.mainTracks().isEmpty()) {
+                in.delete(dig, List.of(tempInternal));
+                return;
+            }
+        } catch (Throwable t) {
+            out.log("failed to delete the temporary group: " + t);
+            return;
+        }
+        out.log("temporary group left because it is not empty");
+        warnOnce("reorder-temp", "トラックの並べ替えに失敗したので、一時的なグループを残しました（中のトラックは手で出してください）");
     }
 
     private void createTrack(String id, String kind, TrackGroup parent, double o) throws ReflectiveOperationException {
@@ -846,9 +972,43 @@ final class BitwigModel {
                 structuralDelete = true;
                 return;
             }
+            if (survivors && !ungroupByMoving(id, g)) {
+                // 中のトラックを出せない。グループごと消すと中のトラックまで消えるので、消さない
+                warnOnce("ungroup", "この Bitwig ではグループ解除を同期できません（グループは残しました）");
+                return;
+            }
         }
         in.delete(dig, List.of(Internals.target(t)));
         structuralDelete = true;
+    }
+
+    /** グループ解除の代わり: 中のトラックをグループのあった位置（親の中）へ出す。全部出せたら true（空のグループが残る）。 */
+    private boolean ungroupByMoving(String id, TrackGroup g) {
+        if (!in.canMoveTracks()) return false;
+        TrackGroup parent = groupFor(parents.get(id));
+        Object parentInternal = Internals.target(parent), groupInternal = Internals.target(g);
+        try {
+            int at = Math.max(0, indexOfInternal(parent, groupInternal));
+            for (Object c : copyOf(g.mainTracks())) {
+                in.moveTrack(parentInternal, groupInternal, Internals.target(c), at++);
+                structuralDelete = true;
+            }
+        } catch (Throwable e) {
+            out.log("failed to move tracks out of group " + id + ": " + e);
+        }
+        return g.mainTracks().isEmpty();
+    }
+
+    /** 動かしている間に元の一覧が変わらないように写す。 */
+    private static List<Object> copyOf(List<?> list) {
+        return new ArrayList<Object>(list);
+    }
+
+    /** group の中で、内部のオブジェクトが internal のトラックの位置（無ければ -1）。 */
+    private static int indexOfInternal(TrackGroup group, Object internal) {
+        List<?> list = group.mainTracks();
+        for (int i = 0; i < list.size(); i++) if (Internals.target(list.get(i)) == internal) return i;
+        return -1;
     }
 
     private void applyTrackProp(TrackOrTrackGroup t, String prop, Object value) {
@@ -881,18 +1041,35 @@ final class BitwigModel {
             // 動かしたクリップ: 作り直さずに今あるものを動かす（中身の違いはこの後で直す）
             Clip moved = findClip(track, moves.get(key));
             if (moved != null) {
-                moved.setTime(Double.parseDouble(timeKey));
+                moved.setTime(put(Double.parseDouble(timeKey)));
                 existing = moved;
             }
+        }
+        if (existing == null && Json.map(value.get("delta")) != null) {
+            // 無いクリップへの編集（相手が編集している間に、こちらで消した・動かした）。サーバーと同じく反映しない
+            // （反映すると、動かしたクリップが元の位置にも戻ってきて 2 つになる）
+            if (trace) out.log("ignore delta for missing clip " + key);
+            return;
         }
         if (existing != null && Json.map(value.get("delta")) != null) {
             // 変わったところだけを今のクリップに重ねる（相手の古い値でこちらの編集を消さないように）
             Map<String, Object> current = readClip(existing);
-            if (current != null && Json.same(current.get("k"), value.get("k"))) value = mergeDelta(current, value);
+            if (current == null || !Json.same(current.get("k"), value.get("k"))) {
+                // 種類（MIDI / オーディオ）の違うクリップへの編集。delta にはノートの一覧 "n" が入っていないので、
+                // これで作り直すと中身が消える。無いクリップへの編集と同じく反映しない
+                if (trace) out.log("ignore delta for clip of other kind " + key);
+                return;
+            }
+            value = mergeDelta(current, value);
         }
         String kind = Json.str(value.get("k"));
         boolean audioTrack = track.getTrackType() == TrackType.AUDIO;
-        if ("midi".equals(kind) == audioTrack) return;  // Live と同じく、種類の合わないトラックには置かない
+        if ("midi".equals(kind) == audioTrack) {
+            // Live と同じく、種類の合わないトラックには置かない（黙って捨てずに知らせる）
+            warnOnce("kind:" + tid + ":" + kind, "「" + owner.getTitle() + "」は" + (audioTrack ? "オーディオ" : "楽器")
+                    + "トラックなので、相手の" + ("midi".equals(kind) ? " MIDI " : "オーディオ") + "クリップは置けませんでした");
+            return;
+        }
 
         if (existing != null) {
             boolean isAudio = existing instanceof AudioClip;
@@ -902,14 +1079,21 @@ final class BitwigModel {
                 recreate = !sameFile(Json.str(current), Json.str(value.get("file")));
             }
             if (recreate) {
+                String file = Json.str(value.get("file"));
+                if ("audio".equals(kind) && (file == null || !new File(file).isFile())) {
+                    // 新しいサンプルファイルがまだ届いていない。消してしまうと何も無くなるので、今のクリップを残す
+                    warnOnce("nofile:" + tid + "/" + timeKey, "サンプルファイルが届いていないのでクリップを作り直せませんでした");
+                    return;
+                }
                 in.deleteEvents(List.of(existing));
                 existing = null;
             }
         }
 
         double start = Double.parseDouble(timeKey);
-        double len = Math.max(Json.num(value.get("len"), 4.0), 0.25);
-        double dur = Math.max(Json.num(value.get("dur"), len), 0.25);
+        // 短いクリップ（ほかの DAW で作ったもの）を長くしないように、下限はごく小さくする
+        double len = Math.max(Json.num(value.get("len"), 4.0), 1.0 / 64);
+        double dur = Math.max(Json.num(value.get("dur"), len), 1.0 / 64);
         Map<String, Object> props = Json.map(value.get("p"));
         if (props == null) props = Map.of();
 
@@ -935,9 +1119,9 @@ final class BitwigModel {
                     note.setWarpEvents(markers);
                 }
                 clip.getContent().getEventTimeline().addEvent(note);
-                clip.setTime(start);
-                clip.setDuration(dur);
+                clip.setTime(put(start));
                 writeClipProps(clip, props);
+                clip.setDuration(put(dur));  // 開始位置（中身のずらし）を変えると長さが 1 目盛りずれるので、長さは最後に
                 track.clipTimeline().addEvent(clip);
                 writeAudioProps(note, props, len);
                 return;
@@ -947,16 +1131,17 @@ final class BitwigModel {
                 if (rows != null)
                     for (Object r : rows) clip.getContent().getEventTimeline().addEvent(createNote(Json.list(r)));
             }
-            clip.setTime(start);
-            clip.setDuration(dur);
+            clip.setTime(put(start));
             writeClipProps(clip, props);
+            clip.setDuration(put(dur));  // 開始位置（中身のずらし）を変えると長さが 1 目盛りずれるので、長さは最後に
             track.clipTimeline().addEvent(clip);
             return;
         }
 
-        if (Math.abs(existing.getDuration() - dur) > 1e-6) existing.setDuration(dur);
         if ("midi".equals(kind)) writeNotes(existing, Json.list(value.get("n")));
         writeClipProps(existing, props);
+        // 開始位置（中身のずらし）を変えると長さが 1 目盛りずれるので、長さは最後に
+        if (Math.abs(existing.getDuration() - put(dur)) > 1e-6) existing.setDuration(put(dur));
         if ("audio".equals(kind) && audioNote(existing) instanceof AudioNote note) writeAudioProps(note, props, len);
     }
 
@@ -1043,9 +1228,9 @@ final class BitwigModel {
             if (!Json.same(current, normalize(ms))) {
                 var markers = factory.createWarpEvents();
                 for (double[] m : ms) markers.addWarpEvent(m[0] - b0, m[1]);
-                if (Math.abs(an.getTime() - b0) > 1e-6) an.setTime(b0);
+                if (Math.abs(an.getTime() - put(b0)) > 1e-6) an.setTime(put(b0));
                 double end = Math.max(ms.get(ms.size() - 1)[0], len);
-                if (end - b0 > 1e-3 && Math.abs(an.getDuration() - (end - b0)) > 1e-6) an.setDuration(end - b0);
+                if (end - b0 > 1e-3 && Math.abs(an.getDuration() - put(end - b0)) > 1e-6) an.setDuration(put(end - b0));
                 an.setWarpEvents(markers);
             }
         }
@@ -1078,17 +1263,18 @@ final class BitwigModel {
         boolean looping = props.containsKey("looping") ? Json.bool(props.get("looping")) : clip.isLoopEnabled();
         if (looping && props.get("ls") instanceof Number ls && props.get("le") instanceof Number le) {
             double start = ls.doubleValue(), length = Math.max(le.doubleValue() - start, 1.0 / 64);
-            if (Math.abs(clip.getLoopStart() - start) > 1e-6) clip.setLoopStart(start);
-            if (Math.abs(clip.getLoopDuration() - length) > 1e-6) clip.setLoopDuration(length);
+            // 比べるのは目盛りにそろえた値と（そろえる前と比べると、同じ目盛りなのに毎回書き直してしまう）
+            if (Math.abs(clip.getLoopStart() - put(start)) > 1e-6) clip.setLoopStart(put(start));
+            if (Math.abs(clip.getLoopDuration() - put(length)) > 1e-6) clip.setLoopDuration(put(length));
         }
-        if (props.get("sm") instanceof Number sm && Math.abs(clip.getPlayStartOffset() - sm.doubleValue()) > 1e-6)
-            clip.setPlayStartOffset(sm.doubleValue());
+        if (props.get("sm") instanceof Number sm && Math.abs(clip.getPlayStartOffset() - put(sm.doubleValue())) > 1e-6)
+            clip.setPlayStartOffset(put(sm.doubleValue()));
     }
 
     private InstrumentNote createNote(List<Object> r) {
         List<Object> row = fullRow(r);
-        InstrumentNote note = factory.createInstrumentNote(0, (int) Json.num(row.get(0), 60), Json.num(row.get(1), 0),
-                Math.max(Json.num(row.get(2), 0.25), 1.0 / 1024), Json.num(row.get(3), 100) / 127.0, Json.num(row.get(7), 64) / 127.0);
+        InstrumentNote note = factory.createInstrumentNote(0, (int) Json.num(row.get(0), 60), put(Json.num(row.get(1), 0)),
+                put(Math.max(Json.num(row.get(2), 0.25), 1.0 / 1024)), Json.num(row.get(3), 100) / 127.0, Json.num(row.get(7), 64) / 127.0);
         if (Json.bool(row.get(4))) note.setIsMuted(true);
         double chance = Json.num(row.get(5), 1.0);
         if (chance < 1.0) note.setChance(chance);
@@ -1112,38 +1298,80 @@ final class BitwigModel {
      */
     private void writeNotes(Clip clip, List<Object> rows) throws ReflectiveOperationException {
         Map<String, Deque<List<Object>>> want = new LinkedHashMap<>();
+        Map<Integer, List<Deque<List<Object>>>> byPitch = new HashMap<>();
         if (rows != null)
             for (Object o : rows) {
                 List<Object> r = fullRow(Json.list(o));
-                want.computeIfAbsent(noteKey(Json.num(r.get(0), 0), Json.num(r.get(1), 0), Json.num(r.get(2), 0)),
-                        k -> new ArrayDeque<>()).add(r);
+                want.computeIfAbsent(noteKey(Json.num(r.get(0), 0), Json.num(r.get(1), 0), Json.num(r.get(2), 0)), k -> {
+                    Deque<List<Object>> bucket = new ArrayDeque<>();
+                    byPitch.computeIfAbsent((int) Json.num(r.get(0), 0), p -> new ArrayList<>()).add(bucket);
+                    return bucket;
+                }).add(r);
             }
         EventTimeline timeline = clip.getContent().getEventTimeline();
         List<Object> remove = new ArrayList<>();
+        List<InstrumentNote> unmatched = new ArrayList<>();
         for (Object o : timeline.getEvents()) {
-            if (!(o instanceof InstrumentNote n)) continue;
+            if (!(o instanceof InstrumentNote n) || n.getDuration() < MIN_NOTE) continue;
             Deque<List<Object>> bucket = want.get(noteKey(n.getKey(), n.getTime(), n.getDuration()));
-            if (bucket == null || bucket.isEmpty()) {
+            if (bucket == null || bucket.isEmpty()) unmatched.add(n);
+            else updateNote(n, bucket.poll());
+        }
+        // 同じものが無かったノートは、少しだけずれた同じ音程のノートと組にする（REAPER などは 960 PPQ に丸めるので、
+        // 位置・長さが少し違って届く）。完全に同じものを先に組にしてから探す（ずれたものが横取りしないように）
+        for (InstrumentNote n : unmatched) {
+            List<Object> r = null;
+            for (Deque<List<Object>> bucket : byPitch.getOrDefault(n.getKey(), List.of())) {
+                List<Object> first = bucket.peek();
+                if (first != null && near(Json.num(first.get(1), 0), n.getTime()) && near(Json.num(first.get(2), 0), n.getDuration())) {
+                    r = bucket.poll();
+                    break;
+                }
+            }
+            if (r == null) {
                 remove.add(n);
                 continue;
             }
-            List<Object> r = bucket.poll();
-            double vel = Json.num(r.get(3), 100) / 127.0;
-            if (Math.abs(n.getOnVelocity() - vel) > 0.5 / 127.0) n.setOnVelocity(vel);
-            boolean mute = Json.bool(r.get(4));
-            if (n.isMuted() != mute) n.setIsMuted(mute);
-            double release = Json.num(r.get(7), 64) / 127.0;
-            if (Math.abs(n.getOffVelocity() - release) > 0.5 / 127.0) n.setOffVelocity(release);
+            // 作り直さずに位置・長さだけ合わせる（目盛りにそろえると同じなら何もしない。エクスプレッションが消えないように）
+            double time = put(Json.num(r.get(1), 0)), length = put(Math.max(Json.num(r.get(2), 0.25), 1.0 / 1024));
+            if (Math.abs(n.getTime() - time) > 1e-6) n.setTime(time);
+            if (Math.abs(n.getDuration() - length) > 1e-6) n.setDuration(length);
+            updateNote(n, r);
         }
         in.deleteEvents(remove);
         for (Deque<List<Object>> bucket : want.values())
             for (List<Object> r : bucket) timeline.addEvent(createNote(r));
     }
 
+    /** 残すノートのベロシティ・ミュート・リリースベロシティを row に合わせる。 */
+    private static void updateNote(InstrumentNote n, List<Object> r) {
+        double vel = Json.num(r.get(3), 100) / 127.0;
+        if (Math.abs(n.getOnVelocity() - vel) > 0.5 / 127.0) n.setOnVelocity(vel);
+        boolean mute = Json.bool(r.get(4));
+        if (n.isMuted() != mute) n.setIsMuted(mute);
+        double release = Json.num(r.get(7), 64) / 127.0;
+        if (Math.abs(n.getOffVelocity() - release) > 0.5 / 127.0) n.setOffVelocity(release);
+    }
+
+    /** ほかの DAW の丸め（960 PPQ）の違いくらいしか離れていない。 */
+    private static boolean near(double a, double b) {
+        return Math.abs(a - b) <= NOTE_TOL;
+    }
+
     // ----------------------------------------------------------- helpers
 
     private void warnOnce(String code, String message) {
         if (warned.add(code)) out.warn(message);
+    }
+
+    /**
+     * Bitwig に拍の位置・長さを書き込むときの値。Bitwig は内部の目盛り（1 拍 960）に切り捨てるので、
+     * 計算の誤差でほんの少し小さいと 1 目盛り（0.00104 拍）ずれてしまう。
+     */
+    static double put(double beats) {
+        // 届く値は 5 桁に丸められている（1/3 拍 → 0.33333）ので、少し足すだけでは 1 目盛り手前に切り捨てられる。
+        // いちばん近い目盛りにそろえてから、切り捨てで下の目盛りに落ちない分だけ足す
+        return Math.round(beats * 960.0) / 960.0 + 1e-9;
     }
 
     static double round(double x) {

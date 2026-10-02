@@ -25,7 +25,8 @@ public sealed record Op(string Key, JsonNode? Value)
         array is JsonArray a ? a.OfType<JsonNode>().Select(FromJson).ToList() : [];
 }
 
-public sealed record Peer(int Id, string Name);
+/// <param name="Version">その人のアプリのバージョン（古いアプリは送ってこないので null）</param>
+public sealed record Peer(int Id, string Name, string? Version = null);
 
 /// <summary>TCP の上で「1 行 = 1 つの JSON」をやり取りする接続。送信は順番を保ってキューに積む。</summary>
 public sealed class JsonLineConnection : IMessageConnection
@@ -35,36 +36,79 @@ public sealed class JsonLineConnection : IMessageConnection
     private readonly Channel<string> _outbox = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _writer;
+    private int _queued;
+    private int _disposed;
 
     public JsonLineConnection(TcpClient client, Stream? stream = null)
     {
         _client = client;
         _client.NoDelay = true;
+        Transport.EnableKeepAlive(client.Client);
         _stream = stream ?? client.GetStream();
         _writer = Task.Run(WriteLoopAsync);
     }
 
     public string RemoteEndPoint => _client.Client.RemoteEndPoint?.ToString() ?? "?";
 
-    public void Send(JsonObject message) => _outbox.Writer.TryWrite(message.ToJsonString());
+    public int MaxMessageBytes { get; set; } = int.MaxValue;
+
+    public void Send(JsonObject message)
+    {
+        if (Interlocked.Increment(ref _queued) > Transport.MaxQueuedMessages)
+        {
+            // 相手が受け取れていない（回線が極端に遅い・止まっている）。溜め続けるとメモリを食うので切る
+            Abort();
+            return;
+        }
+        if (!_outbox.Writer.TryWrite(message.ToJsonString())) Interlocked.Decrement(ref _queued);
+    }
+
+    public async ValueTask WaitForSpaceAsync(int maxQueued, CancellationToken ct)
+    {
+        while (Volatile.Read(ref _queued) > maxQueued)
+        {
+            if (_cts.IsCancellationRequested) throw new IOException("接続が切れました");
+            await Task.Delay(5, ct);
+        }
+    }
 
     public async IAsyncEnumerable<JsonObject> ReadAllAsync([EnumeratorCancellation] CancellationToken ct = default)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);
-        using var reader = new StreamReader(_stream, new UTF8Encoding(false), false, 1 << 16, leaveOpen: true);
+        var buffer = new byte[64 * 1024];
+        using var line = new MemoryStream();
+        var ready = new List<JsonObject>();
         while (true)
         {
-            string? line;
-            try { line = await reader.ReadLineAsync(linked.Token); }
-            catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException) { yield break; }
-            if (line is null) yield break;
-            if (line.Length == 0) continue;
+            int read;
+            try { read = await _stream.ReadAsync(buffer, linked.Token); }
+            catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or SocketException) { yield break; }
+            if (read == 0) yield break;
 
-            JsonObject? message = null;
-            try { message = JsonNode.Parse(line) as JsonObject; }
-            catch (JsonException) { }
-            if (message is not null) yield return message;
+            var start = 0;
+            for (var i = 0; i < read; i++)
+            {
+                if (buffer[i] != (byte)'\n') continue;
+                line.Write(buffer, start, i - start);
+                start = i + 1;
+                if (Parse(line) is { } message) ready.Add(message);
+                line.SetLength(0);
+            }
+            line.Write(buffer, start, read - start);
+            // 改行の来ないとても長い行（壊れたデータ・嫌がらせ）で、メモリを食いつぶさないようにする
+            var tooLong = line.Length > MaxMessageBytes;
+            foreach (var message in ready) yield return message;
+            ready.Clear();
+            if (tooLong) yield break;
         }
+    }
+
+    private static JsonObject? Parse(MemoryStream line)
+    {
+        var span = line.GetBuffer().AsSpan(0, (int)line.Length).TrimEnd((byte)'\r');
+        if (span.IsEmpty) return null;
+        try { return JsonNode.Parse(span) as JsonObject; }
+        catch (JsonException) { return null; }
     }
 
     private async Task WriteLoopAsync()
@@ -75,18 +119,29 @@ public sealed class JsonLineConnection : IMessageConnection
             {
                 var bytes = Encoding.UTF8.GetBytes(line + "\n");
                 await _stream.WriteAsync(bytes, _cts.Token);
+                Interlocked.Decrement(ref _queued);
             }
         }
-        catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or SocketException) { }
+        catch (Exception e) when (e is IOException or ObjectDisposedException or OperationCanceledException or SocketException)
+        {
+            // 送れなくなったら読む方も止める（相手からは切断に見える。つなぎ直しが始まる）
+            Abort();
+        }
+    }
+
+    private void Abort()
+    {
+        try { _cts.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         _outbox.Writer.TryComplete();
         // 残っている送信を少しだけ待ってから閉じる
         await Task.WhenAny(_writer, Task.Delay(500));
-        await _cts.CancelAsync();
+        Abort();
         _client.Dispose();
-        _cts.Dispose();
     }
 }

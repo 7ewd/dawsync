@@ -2,8 +2,12 @@
 Windows で `dotnet publish -r osx-arm64 / osx-x64` した実行ファイルを、Mac 用の AbletonMulti.app にまとめて
 tar.gz にする（Windows の zip だと実行権限が消えるため、tar で権限を付けて固める）。
 
-Windows で作ったアプリは署名されていないので、Mac 側で最初に 1 回だけ
-「最初に実行.command」を右クリック →「開く」で実行してもらう（アドホック署名と隔離属性の解除をする）。
+Windows で作ったアプリは署名されていないので、Mac 側で最初に 1 回だけ「最初に実行.command」を実行してもらう
+（アドホック署名と隔離属性の解除をする）。そのままダブルクリックすると止められるので:
+  - macOS 15 以降: 一度ダブルクリックしてから「システム設定」→「プライバシーとセキュリティ」→「このまま開く」
+  - macOS 14: 右クリック →「開く」
+同じ説明を「はじめにお読みください.txt」として一緒に入れる。
+.NET 10 は macOS 14 以降でしか動かないので、LSMinimumSystemVersion は 14.0 にしている。
 Mac 上でビルドする場合は build/publish-macos.sh を使う（そちらは署名まで自動で行う）。
 
 使い方: python build/package_macos.py
@@ -29,11 +33,26 @@ INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>{v}</string>
   <key>CFBundleVersion</key><string>{v}</string>
-  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>同じネットワークにいる人のルームにつないだり、自分のルームに参加してもらったりするために使います。</string>
 </dict>
 </plist>
 """.format(v=VERSION)
+
+README = """AbletonMulti（Mac 版）の始め方
+
+macOS 14 以降が必要です。
+
+1. 「最初に実行.command」をダブルクリックします（初回だけ）。
+   「開けません」と出て止められたら:
+   - macOS 15 以降: 「完了」で閉じてから、「システム設定」→「プライバシーとセキュリティ」を開き、
+     下の方にある「このまま開く」を押します（パスワードを聞かれたら入力）。
+   - macOS 14: 「最初に実行.command」を右クリック →「開く」→「開く」を押します。
+2. 「準備できました」と出たら、AbletonMulti.app が開きます。次からは AbletonMulti.app をダブルクリックするだけで使えます。
+3. ローカルネットワークへの接続を許可するか聞かれたら「許可」を押してください
+   （同じ Wi-Fi の人とルームでつながるのに使います）。
+"""
 
 SETUP_COMMAND = """#!/bin/bash
 # AbletonMulti を Mac で初めて使うときに 1 回だけ実行する。
@@ -74,4 +93,5 @@ for rid in ("osx-arm64", "osx-x64"):
         add_file(tar, top + "/AbletonMulti.app/Contents/Info.plist", INFO_PLIST.encode("utf-8"), 0o644)
         add_file(tar, top + "/AbletonMulti.app/Contents/MacOS/AbletonMulti", open(binary, "rb").read(), 0o755)
         add_file(tar, top + "/最初に実行.command", SETUP_COMMAND.encode("utf-8"), 0o755)
+        add_file(tar, top + "/はじめにお読みください.txt", README.encode("utf-8"), 0o644)
     print("完成: %s (%.1f MB)" % (out, os.path.getsize(out) / 1024 / 1024))

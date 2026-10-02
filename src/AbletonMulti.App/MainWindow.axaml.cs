@@ -1,9 +1,16 @@
 using Avalonia.Controls;
+using AbletonMulti.Core.Sync;
 
 namespace AbletonMulti.App;
 
 public partial class MainWindow : Window
 {
+    // ルームや公開の後片付けを待つのは最大でこれだけ（固まっても閉じられるように）
+    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(4);
+
+    private bool _shuttingDown;
+    private bool _readyToClose;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -20,9 +27,38 @@ public partial class MainWindow : Window
         bitmap.Save(path);
     }
 
-    protected override async void OnClosed(EventArgs e)
+    /// <summary>
+    /// 閉じるときは、いったん止めてルームと公開（cloudflared）の後片付けを待ってから本当に閉じる
+    /// （待たずにアプリが終わると、cloudflared が動いたまま残ることがある）。
+    /// </summary>
+    protected override void OnClosing(WindowClosingEventArgs e)
     {
-        await SessionPage.ShutdownAsync();
-        base.OnClosed(e);
+        base.OnClosing(e);
+        if (e.Cancel || _readyToClose) return;
+        e.Cancel = true;
+        if (_shuttingDown) return;
+        _shuttingDown = true;
+        IsEnabled = false;
+        _ = ShutdownAndCloseAsync();
+    }
+
+    private async Task ShutdownAndCloseAsync()
+    {
+        try
+        {
+            await SessionPage.ShutdownAsync().AsTask().WaitAsync(ShutdownTimeout);
+        }
+        catch (Exception e)
+        {
+            // 時間切れやエラーでも閉じる（原因はログに残す）
+            ErrorLog.Write("Shutdown", e);
+        }
+        finally
+        {
+            // 後片付けが終わらなかったときも、cloudflared だけは確実に止める
+            CloudflareTunnel.KillAll();
+            _readyToClose = true;
+            Close();
+        }
     }
 }
