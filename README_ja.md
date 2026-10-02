@@ -1,12 +1,14 @@
 # DAW Sync
+[English](README_en.md) / [日本語](README_ja.md)
 
 <img src="assets/DAW-Sync-logo-vtuber.png" alt="DAW Sync logo" width="50%">
 
 <img src="assets/DAW-Sync-poster.png" alt="DAW Sync supported DAWs poster" width="50%">
 
-[English](README_en.md) / [日本語](README_ja.md)
+DAW Syncは、異なるOSやDAWを使う人同士が、簡単に合作できるように設計されたソフトウェアです。<br>
+主にリアルタイムでMIDIを編集、オーディオサンプルの配置ができます。
 
-DAW Sync は、異なる OS や DAW を使うコンポーザー同士が、制作環境の違いを越えてスムーズにコラボレーションできるように設計されたソフトウェアです。
+## お金ないです
 
 <a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a>
 
