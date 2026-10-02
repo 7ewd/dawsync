@@ -45,6 +45,9 @@ public static class OpDescriber
             {
                 ["tempo"] => $"テンポを {Num(v):0.##} BPM に変更",
                 ["sig"] => $"拍子を {(int?)v?[0]}/{(int?)v?[1]} に変更",
+                ["locators"] => "ロケーターを更新",
+                ["tempo_map"] => "BPM の変動を更新",
+                ["sig_map"] => "拍子変更を更新",
 
                 ["t", var id] => v is null ? $"トラック{Name(state, "t", id)}を削除"
                     : !existed ? $"{KindName((string?)v["k"])}トラック{Name(state, "t", id)}を追加"

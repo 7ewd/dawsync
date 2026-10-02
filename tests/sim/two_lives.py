@@ -241,6 +241,28 @@ check("ミキサー（音量・パン・センド・マスター・ミュート�
       and B.song.master_track.mixer_device.volume.value != 0.7
       and B.song.tracks[0].mute is False and A.song.tracks[1].solo is False)
 
+# ============================================================== アレンジメントのロケーター／テンポ・拍子マップ
+A.song.current_song_time = 8.0
+A.song.set_or_delete_cue()
+A.song.cue_points[0].name = "Verse"
+check("ロケーターの位置と名称", lambda: [(c.time, c.name) for c in B.song.cue_points] == [(8.0, "Verse")])
+B.song.cue_points[0].name = "Verse B"
+check("ロケーター名の変更", lambda: [(c.time, c.name) for c in A.song.cue_points] == [(8.0, "Verse B")])
+A.song.cue_points[0].time = 12.0
+check("ロケーター位置の変更", lambda: [(c.time, c.name) for c in B.song.cue_points] == [(12.0, "Verse B")])
+A.song.current_song_time = 12.0
+A.song.set_or_delete_cue()
+check("ロケーターの削除", lambda: len(B.song.cue_points) == 0)
+
+# Live の API では非ゼロ位置のテンポ・拍子オートメーションを編集できないため、
+# 基準値だけ反映し、受け取ったマップの残りは状態として保持する。
+B.script._model.apply([{"k": "tempo_map", "v": [[0.0, 100.0], [16.0, 140.0]]}], True, {})
+check("テンポマップの基準値", lambda: B.song.tempo == 100.0
+      and B.script._model.read("tempo_map") == [[0.0, 100.0], [16.0, 140.0]])
+B.script._model.apply([{"k": "sig_map", "v": [[0.0, 3, 4], [16.0, 7, 8]]}], True, {})
+check("拍子マップの基準値", lambda: (B.song.signature_numerator, B.song.signature_denominator) == (3, 4)
+      and B.script._model.read("sig_map") == [[0.0, 3, 4], [16.0, 7, 8]])
+
 B.song.tracks[2].name = "Drums Bus"
 check("トラック名", lambda: A.song.tracks[2].name == "Drums Bus")
 

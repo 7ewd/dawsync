@@ -20,10 +20,12 @@ import com.bitwig.extension.api.Color;
 import com.bitwig.extension.api.project.Factory;
 import com.bitwig.extension.api.project.Project;
 import com.bitwig.extension.api.project.Transport;
+import com.bitwig.extension.api.project.parameter.AutomationEvents;
 import com.bitwig.extension.api.project.parameter.Unit;
 import com.bitwig.extension.api.project.timeline.AudioClip;
 import com.bitwig.extension.api.project.timeline.AudioNote;
 import com.bitwig.extension.api.project.timeline.Clip;
+import com.bitwig.extension.api.project.timeline.CueMarker;
 import com.bitwig.extension.api.project.timeline.EventTimeline;
 import com.bitwig.extension.api.project.timeline.InstrumentNote;
 import com.bitwig.extension.api.project.timeline.NoteClip;
@@ -36,7 +38,8 @@ import com.bitwig.extension.api.project.track.TrackType;
 /**
  * Bitwig のプロジェクトを「キー → 値」の集まりとして読み書きする。キーと値の形は Live 用の model.py と同じ。
  *
- *   tempo, sig
+ *   tempo, sig, locators ([[beat, name], ...]), tempo_map ([[beat, bpm], ...]),
+ *   sig_map ([[beat, numerator, denominator], ...])
  *   t/<id>                  {"o": 並び順, "k": midi|audio|group, "g": 入っているグループの id}
  *   t/<id>/name|color（ミュート・ソロは各自のものなので同期しない）
  *   c/a/<トラック id>/<開始位置>  アレンジャーのクリップ {"k", "len", "dur", "n" or "file", "p"}
@@ -80,6 +83,12 @@ final class BitwigModel {
     private int counter;
     private boolean initialized;
     private boolean baselineNext;
+
+    // Bitwig の公開 API は tempo/time-signature automation の読み出しを提供しないため、
+    // Maltese が最後に書き込んだマップを保持する。新規プロジェクトでは現在値を beat 0
+    // の点として返す。Cue marker は公開 API で完全に読み書きできる。
+    private List<List<Object>> tempoMapCache;
+    private List<List<Object>> sigMapCache;
 
     // 最後に読んだときのトラック
     private final Map<String, TrackOrTrackGroup> tracks = new HashMap<>();
@@ -127,9 +136,28 @@ final class BitwigModel {
     Map<String, Object> readAll() {
         Map<String, Object> state = new LinkedHashMap<>();
         Transport transport = api.getTransport();
-        state.put("tempo", round(transport.getTempo().getValue(Unit.BPM), 3));
+        double currentTempo = round(transport.getTempo().getValue(Unit.BPM), 3);
+        state.put("tempo", currentTempo);
         var sig = transport.getTimeSignature();
         state.put("sig", List.of((double) sig.getNumerator(), (double) sig.getDenominator()));
+
+        // Project.getCueMarkers() is part of the public Bitwig project API.  The sync
+        // protocol uses beat positions, which are also the positions used by Bitwig's
+        // arrangement timeline.
+        List<List<Object>> locators = new ArrayList<>();
+        for (Object event : api.getCueMarkers().getEvents()) {
+            if (!(event instanceof CueMarker marker)) continue;
+            locators.add(List.of(round(marker.getTime()), marker.getTitle() == null ? "" : marker.getTitle()));
+        }
+        locators.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
+        state.put("locators", locators);
+
+        if (tempoMapCache == null || tempoMapCache.isEmpty())
+            tempoMapCache = new ArrayList<>(List.of(List.of(0.0, currentTempo)));
+        state.put("tempo_map", tempoMapCache);
+        if (sigMapCache == null || sigMapCache.isEmpty())
+            sigMapCache = new ArrayList<>(List.of(List.of(0.0, (double) sig.getNumerator(), (double) sig.getDenominator())));
+        state.put("sig_map", sigMapCache);
 
         List<TrackOrTrackGroup> flat = new ArrayList<>();
         List<String> ignored = new ArrayList<>();
@@ -382,6 +410,8 @@ final class BitwigModel {
         Transport transport = api.getTransport();
         transport.getTempo().setValue(120.0, Unit.BPM);
         transport.setTimeSignature(factory.createTimeSignature(4, 4, transport.getTimeSignature().getTickRate()));
+        tempoMapCache = new ArrayList<>(List.of(List.of(0.0, 120.0)));
+        sigMapCache = new ArrayList<>(List.of(List.of(0.0, 4.0, 4.0)));
         Track keep = factory.createInstrumentTrack();
         TrackGroup root = api.getTrackGroup();
         in.insertTrack(Internals.target(root), Internals.target(keep), 0);
@@ -744,6 +774,10 @@ final class BitwigModel {
                     double bpm = Json.num(value, 120);
                     if (Math.abs(api.getTransport().getTempo().getValue(Unit.BPM) - bpm) > 1e-6)
                         api.getTransport().getTempo().setValue(bpm, Unit.BPM);
+                    // Keep any non-zero automation points already received.  The
+                    // scalar key is sent alongside tempo_map by older and newer
+                    // peers, and should only update the map's beat-zero value.
+                    tempoMapCache = withTempoBaseline(tempoMapCache, bpm);
                 }
                 case "sig" -> {
                     List<Object> l = Json.list(value);
@@ -753,7 +787,13 @@ final class BitwigModel {
                     int num = (int) Json.num(l.get(0), 4), den = (int) Json.num(l.get(1), 4);
                     if (current.getNumerator() != num || current.getDenominator() != den)
                         transport.setTimeSignature(factory.createTimeSignature(num, den, current.getTickRate()));
+                    // As with tempo, preserve non-zero signature changes when a
+                    // compatibility scalar update arrives in the same batch.
+                    sigMapCache = withSigBaseline(sigMapCache, num, den);
                 }
+                case "locators" -> applyLocators(Json.list(value));
+                case "tempo_map" -> applyTempoMap(Json.list(value));
+                case "sig_map" -> applySigMap(Json.list(value));
                 case "t" -> {
                     if (parts.length == 2) return applyTrack(parts[1], Json.map(value));
                     TrackOrTrackGroup t = tracks.get(parts[1]);
@@ -788,6 +828,108 @@ final class BitwigModel {
 
     private void remember(String key, Object value) {
         if (orphans.size() < 20000) orphans.put(key, value);
+    }
+
+    private static List<List<Object>> withTempoBaseline(List<List<Object>> map, double bpm) {
+        List<List<Object>> result = new ArrayList<>();
+        boolean found = false;
+        if (map != null)
+            for (List<Object> row : map) {
+                if (row == null || row.size() < 2) continue;
+                double beat = Json.num(row.get(0), 0);
+                if (Math.abs(beat) < 1e-6) {
+                    result.add(List.of(0.0, round(bpm)));
+                    found = true;
+                } else {
+                    result.add(List.of(round(beat), round(Json.num(row.get(1), bpm))));
+                }
+            }
+        if (!found) result.add(List.of(0.0, round(bpm)));
+        result.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
+        return result;
+    }
+
+    private static List<List<Object>> withSigBaseline(List<List<Object>> map, int num, int den) {
+        List<List<Object>> result = new ArrayList<>();
+        boolean found = false;
+        if (map != null)
+            for (List<Object> row : map) {
+                if (row == null || row.size() < 3) continue;
+                double beat = Json.num(row.get(0), 0);
+                if (Math.abs(beat) < 1e-6) {
+                    result.add(List.of(0.0, (double) num, (double) den));
+                    found = true;
+                } else {
+                    result.add(List.of(round(beat), Json.num(row.get(1), num), Json.num(row.get(2), den)));
+                }
+            }
+        if (!found) result.add(List.of(0.0, (double) num, (double) den));
+        result.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
+        return result;
+    }
+
+    /** Replace the arrangement cue-marker list in one undoable operation. */
+    private void applyLocators(List<Object> raw) {
+        if (raw == null) return;
+        EventTimeline timeline = api.getCueMarkers();
+        // clearTime removes all events in the interval; use the current last marker rather
+        // than Double.MAX_VALUE because some Bitwig versions clamp timeline ranges.
+        double end = 0;
+        boolean hadMarkers = false;
+        for (Object event : timeline.getEvents())
+            if (event instanceof CueMarker marker) {
+                hadMarkers = true;
+                end = Math.max(end, marker.getTime());
+            }
+        if (hadMarkers) timeline.clearTime(0, Math.max(1.0, end + 1.0));
+        for (Object item : raw) {
+            List<Object> row = Json.list(item);
+            if (row == null || row.size() < 2) continue;
+            double beat = Math.max(0, Json.num(row.get(0), 0));
+            CueMarker marker = factory.createCueMarker(beat);
+            marker.setTitle(String.valueOf(row.get(1)));
+            timeline.addEvent(marker);
+        }
+    }
+
+    /** Write Bitwig's native tempo automation (values are BPM, positions are beats). */
+    private void applyTempoMap(List<Object> raw) {
+        if (raw == null || raw.isEmpty()) return;
+        AutomationEvents events = factory.createDoubleAutomationEvents(Unit.BPM);
+        List<List<Object>> normalized = new ArrayList<>();
+        for (Object item : raw) {
+            List<Object> row = Json.list(item);
+            if (row == null || row.size() < 2) continue;
+            double beat = Math.max(0, Json.num(row.get(0), 0));
+            double bpm = Math.max(1, Json.num(row.get(1), 120));
+            events.addPoint(beat, bpm);
+            normalized.add(List.of(round(beat), round(bpm)));
+        }
+        if (normalized.isEmpty()) return;
+        api.getTransport().getTempo().setAutomation(events);
+        normalized.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
+        tempoMapCache = normalized;
+    }
+
+    /** Write Bitwig's native time-signature automation. */
+    private void applySigMap(List<Object> raw) {
+        if (raw == null || raw.isEmpty()) return;
+        AutomationEvents events = factory.createTimeSignatureEvents();
+        int tickRate = api.getTransport().getTimeSignature().getTickRate();
+        List<List<Object>> normalized = new ArrayList<>();
+        for (Object item : raw) {
+            List<Object> row = Json.list(item);
+            if (row == null || row.size() < 3) continue;
+            double beat = Math.max(0, Json.num(row.get(0), 0));
+            int num = Math.max(1, (int) Json.num(row.get(1), 4));
+            int den = Math.max(1, (int) Json.num(row.get(2), 4));
+            events.addPoint(beat, factory.createTimeSignature(num, den, tickRate));
+            normalized.add(List.of(round(beat), (double) num, (double) den));
+        }
+        if (normalized.isEmpty()) return;
+        api.getTransport().setTimeSignature(events);
+        normalized.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
+        sigMapCache = normalized;
     }
 
     private void applyOrphans(Set<String> applied, boolean deleted) {

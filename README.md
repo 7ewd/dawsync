@@ -10,12 +10,14 @@ Maltese is an experimental tool for collaborative Ableton Live projects across m
 
 ## Features
 
-- Sync tempo, time signature, tracks, scenes, and MIDI / audio clips
+- Sync locator names and positions, tempo / time-signature changes, tracks, scenes, and MIDI / audio clips
 - Edit together from Live, Bitwig, and REAPER
 - Invite collaborators with password-protected rooms and Cloudflare Quick Tunnel
 - Check `.als` dependencies such as samples, plugins, and Packs
 
 Mixer settings (volume, pan, sends, and FX) are not synchronized. Back up important projects before using this experimental release.
+
+Live's Remote Script API can edit locators but cannot edit arrangement tempo or time-signature automation. In Live, Maltese applies the beat-zero value and preserves the other map points for the other hosts.
 
 ## Usage
 

@@ -1,7 +1,10 @@
 # Live のセットを「キー → 値」の集まりとして読み書きする。
 #
 # キーの一覧（<id> はトラック・シーン・デバイスごとの ID。番号ではないので、追加・削除でずれない）
-#   tempo, sig                     テンポ、拍子
+#   tempo, sig                     テンポ、拍子（既存クライアント互換）
+#   locators                       アレンジメントのロケーター [[拍, 名称], ...]
+#   tempo_map                      テンポ変更 [[拍, BPM], ...]（Live は拍 0 の基準値のみ）
+#   sig_map                        拍子変更 [[拍, 分子, 分母], ...]（Live は拍 0 の基準値のみ）
 #   t/<id>                         トラックがあること {"k": midi|audio|group, "o": 並び順, "g": 入っているグループの id}（null = 削除）
 #                                  グループは Live の API で作れないので、相手が作ったら手動で作ってもらい、自動でつなぐ
 #   t/<id>/name|color              （ミキサー: 音量・パン・センド・ミュート・ソロは各自のものなので同期しない）
@@ -126,6 +129,12 @@ class Model(object):
         self._clip_by_key = {}      # キー -> クリップ
         self._arrangement = []      # [クリップ, キー, 開始, 終了]（位置・長さの変化を定期的に見る用）
         self._poll_ticks = 0
+        self._last_locators = None
+        # Live cannot edit tempo/signature automation points. Keep a shadow of a
+        # richer map received from another DAW so the unsupported points survive
+        # the next snapshot; the beat-zero value still follows Live's global value.
+        self._tempo_map_shadow = None
+        self._sig_map_shadow = None
         self._collections = {}      # id -> そのオブジェクトが属する Collection
         self._containers = {}       # 置き場所のキー -> (Track / Chain, Collection)
         self._unplaced = set()      # 並べ替えができず、並び順どおりに置けていないもの
@@ -206,6 +215,9 @@ class Model(object):
         song.tempo = 120.0
         song.signature_numerator = 4
         song.signature_denominator = 4
+        self._last_locators = None
+        self._tempo_map_shadow = None
+        self._sig_map_shadow = None
         self.needs_rebuild = True
 
     # --------------------------------------------------------- rebuild
@@ -489,6 +501,25 @@ class Model(object):
         self._bind("sig", lambda: [song.signature_numerator, song.signature_denominator], set_sig,
                    [(song, "signature_numerator"), (song, "signature_denominator")])
 
+        # Arrangement のロケーターは Live の LOM から位置・名称を読み取れる。
+        # cue point の作成／削除 API は現在位置でトグルする set_or_delete_cue のみなので、
+        # 書き込み時は一時的に current_song_time を移動して操作し、最後に復元する。
+        self._bind("locators", lambda: self._read_locators(song),
+                   lambda value: self._write_locators(song, value), [(song, "cue_points")])
+        for cue in list(getattr(song, "cue_points", ()) or ()):
+            self._listen(cue, "name", self._mark("locators"))
+            self._listen(cue, "time", self._mark("locators"))
+
+        # Live の Remote Script API にはテンポ／拍子のアレンジメント・エンベロープを
+        # 読み書きする機能がない。ほかの DAW から届いたマップは拍 0 の基準値だけ反映し、
+        # 非ゼロ位置は Live 側で編集できないため警告するが、受信したマップは
+        # シャドウとして保持し、次回スナップショットで他 DAW に返せるようにする。
+        self._bind("tempo_map", lambda: self._read_tempo_map(song),
+                   lambda value: self._write_tempo_map(song, value), [(song, "tempo")])
+        self._bind("sig_map", lambda: self._read_sig_map(song),
+                   lambda value: self._write_sig_map(song, value),
+                   [(song, "signature_numerator"), (song, "signature_denominator")])
+
         for prop in ("tracks", "return_tracks", "scenes"):
             self._listen(song, prop, self._structure_changed)
 
@@ -528,6 +559,107 @@ class Model(object):
         if SYNC_DEVICES:
             changed += self._bind_devices("m", song.master_track)
         return changed
+
+    @staticmethod
+    def _read_locators(song):
+        result = []
+        for cue in list(getattr(song, "cue_points", ()) or ()):
+            try:
+                result.append([_round(cue.time), str(getattr(cue, "name", ""))])
+            except Exception:
+                continue
+        return sorted(result, key=lambda x: (x[0], x[1]))
+
+    def _write_locators(self, song, value):
+        wanted = []
+        for row in value or []:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            try:
+                wanted.append((_round(row[0]), str(row[1])))
+            except (TypeError, ValueError):
+                continue
+        wanted.sort(key=lambda x: (x[0], x[1]))
+        current = []
+        for cue in list(getattr(song, "cue_points", ()) or ()):
+            try:
+                current.append((cue, _round(cue.time), str(getattr(cue, "name", ""))))
+            except Exception:
+                pass
+        # Match by exact beat/name first, then by beat. Matching by beat lets a rename avoid
+        # deleting/recreating the marker and preserves Live's internal cue identity.
+        used = set()
+        matched = []
+        for beat, name in wanted:
+            hit = next((x for n, x in enumerate(current)
+                        if n not in used and x[1] == beat and x[2] == name), None)
+            if hit is None:
+                hit = next((x for n, x in enumerate(current) if n not in used and x[1] == beat), None)
+            matched.append((beat, name, hit))
+            if hit is not None:
+                used.add(current.index(hit))
+        old_time = getattr(song, "current_song_time", None)
+        try:
+            for cue, beat, name in current:
+                if not any(hit is not None and hit[0] is cue for _, _, hit in matched):
+                    song.current_song_time = beat
+                    song.set_or_delete_cue()
+            for beat, name, hit in matched:
+                if hit is None:
+                    song.current_song_time = beat
+                    song.set_or_delete_cue()
+                    hit = next((x for x in list(getattr(song, "cue_points", ()) or ())
+                                if abs(float(x.time) - beat) < 1e-4), None)
+                if hit is not None:
+                    (hit[0] if isinstance(hit, tuple) else hit).name = name
+        finally:
+            if old_time is not None:
+                try:
+                    song.current_song_time = old_time
+                except Exception:
+                    pass
+        self._last_locators = self._read_locators(song)
+
+    def _write_tempo_map(self, song, value):
+        rows = [r for r in (value or []) if isinstance(r, (list, tuple)) and len(r) >= 2]
+        if rows:
+            self._tempo_map_shadow = sorted([[float(r[0]), _round(float(r[1]), 3)] for r in rows], key=lambda r: r[0])
+            zero = min(rows, key=lambda r: abs(float(r[0])))
+            try:
+                song.tempo = float(zero[1])
+            except (TypeError, ValueError):
+                pass
+        if any(abs(float(r[0])) > 1e-5 for r in rows):
+            self._warn_once("tempo-map", "Live の Remote Script API ではテンポ・オートメーションを編集できないため、拍 0 の BPM のみ反映しました")
+
+    def _write_sig_map(self, song, value):
+        rows = [r for r in (value or []) if isinstance(r, (list, tuple)) and len(r) >= 3]
+        if rows:
+            self._sig_map_shadow = sorted([[float(r[0]), int(r[1]), int(r[2])] for r in rows], key=lambda r: r[0])
+            zero = min(rows, key=lambda r: abs(float(r[0])))
+            try:
+                song.signature_numerator = int(zero[1])
+                song.signature_denominator = int(zero[2])
+            except (TypeError, ValueError):
+                pass
+        if any(abs(float(r[0])) > 1e-5 for r in rows):
+            self._warn_once("sig-map", "Live の Remote Script API ではアレンジメント拍子変更を編集できないため、拍 0 の拍子のみ反映しました")
+
+    def _read_tempo_map(self, song):
+        if self._tempo_map_shadow:
+            result = [list(row) for row in self._tempo_map_shadow]
+            zero = min((row for row in result), key=lambda row: abs(float(row[0])))
+            zero[1] = _round(song.tempo, 3)
+            return result
+        return [[0.0, _round(song.tempo, 3)]]
+
+    def _read_sig_map(self, song):
+        if self._sig_map_shadow:
+            result = [list(row) for row in self._sig_map_shadow]
+            zero = min((row for row in result), key=lambda row: abs(float(row[0])))
+            zero[1], zero[2] = int(song.signature_numerator), int(song.signature_denominator)
+            return result
+        return [[0.0, int(song.signature_numerator), int(song.signature_denominator)]]
 
     def _bind_named(self, prefix, obj, mute_solo):
         def setter(name, cast):
@@ -1315,6 +1447,16 @@ class Model(object):
         if self._poll_ticks < 10:
             return
         self._poll_ticks = 0
+        # Live cue point positions are read-only and some Live versions do not emit a
+        # cue_points notification when a marker is dragged. Poll the compact value so
+        # moves and renames still reach the other DAWs.
+        if "locators" in self.bindings:
+            now_locators = self.read("locators")
+            if self._last_locators is None:
+                self._last_locators = now_locators
+            elif now_locators != self._last_locators:
+                self._last_locators = now_locators
+                self.dirty.add("locators")
         for entry in self._arrangement:
             clip, key, start, end = entry
             try:

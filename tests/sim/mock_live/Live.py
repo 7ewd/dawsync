@@ -411,6 +411,17 @@ class Scene(Listenable):
         self.color = 0
 
 
+class CuePoint(Listenable):
+    """Arrangement locator exposed by Live's Song.cue_points list."""
+
+    _observed = ("name", "time")
+
+    def __init__(self, time=0.0, name=""):
+        Listenable.__init__(self)
+        self.time = float(time)
+        self.name = str(name)
+
+
 class SongView:
     def __init__(self):
         self.selected_track = None
@@ -418,18 +429,32 @@ class SongView:
 
 
 class Song(Listenable):
-    _observed = ("tempo", "signature_numerator", "signature_denominator", "tracks", "return_tracks", "scenes")
+    _observed = ("tempo", "signature_numerator", "signature_denominator", "tracks", "return_tracks", "scenes", "cue_points")
 
     def __init__(self, scenes=4):
         Listenable.__init__(self)
         self.tempo = 120.0
         self.signature_numerator = 4
         self.signature_denominator = 4
+        self.current_song_time = 0.0
+        self.cue_points = []
         self.tracks = []
         self.return_tracks = []
         self.scenes = [Scene() for _ in range(scenes)]
         self.master_track = Track("Master", midi=False, slots=0, sends=0)
         self.view = SongView()
+
+    def set_or_delete_cue(self):
+        """Mirror Live's toggle at the current Arrangement playback position."""
+        at = float(self.current_song_time)
+        cues = list(self.cue_points)
+        hit = next((c for c in cues if abs(c.time - at) < 1e-4), None)
+        if hit is None:
+            cues.append(CuePoint(at))
+            cues.sort(key=lambda c: c.time)
+        else:
+            cues.remove(hit)
+        self.cue_points = cues
 
     def _slots(self):
         return len(self.scenes)

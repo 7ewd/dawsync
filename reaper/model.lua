@@ -1,6 +1,6 @@
 -- REAPER のプロジェクトを「キー → 値」の集まりとして読み書きする。キーと値の形は Live 用の model.py と同じ。
 --
---   tempo, sig
+--   tempo, sig, tempo_map, sig_map, locators
 --   t/<id>                  {"o": 並び順, "k": midi|audio|group, "g": 入っているフォルダ（グループ）の id}
 --   t/<id>/name|color       （ミキサーは各自のものなので同期しない）
 --   c/a/<トラック id>/<開始位置>  アイテム（= アレンジメントのクリップ）{"k", "len", "dur", "n" or "file", "p"}
@@ -366,6 +366,11 @@ function M:read_all()
   local tnum, tden, bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)
   state.tempo = round(bpm, 3)
   state.sig = json.array({ tnum, tden })
+  -- Arrangement-level timing data.  Positions are represented in quarter notes
+  -- so that a tempo-map edit does not move locators when it is applied.
+  state.locators = self:read_locators()
+  state.tempo_map = self:read_tempo_map()
+  state.sig_map = self:read_sig_map()
 
   local count = reaper.CountTracks(0)
   local list, tracks = {}, {}
@@ -412,6 +417,77 @@ function M:read_all()
     if not alive[guid] then self.ids[guid] = nil end
   end
   return state
+end
+
+-- Point markers (regions are intentionally excluded: Live/Bitwig locators are
+-- points, and there is no portable region equivalent in the shared protocol).
+function M:read_locators()
+  local result = json.array({})
+  local count = reaper.GetNumRegionsOrMarkers(0)
+  for i = 0, count - 1 do
+    local _, isrgn, pos, _, name = reaper.EnumProjectMarkers3(0, i)
+    if not isrgn then
+      result[#result + 1] = json.array({
+        round(reaper.TimeMap2_timeToQN(0, pos)),
+        name or ""
+      })
+    end
+  end
+  table.sort(result, row_less)
+  return result
+end
+
+-- Read all effective tempo/time-signature changes.  REAPER stores both values
+-- on one tempo marker; the public protocol keeps the two maps separate, so
+-- unchanged consecutive values are omitted from each map.
+function M:read_tempo_map()
+  local result = json.array({})
+  local _, _, initial = reaper.TimeMap_GetTimeSigAtTime(0, 0)
+  local previous = round(initial, 3)
+  local count = reaper.CountTempoTimeSigMarkers(0)
+  for i = 0, count - 1 do
+    local ok, timepos, _, _, bpm = reaper.GetTempoTimeSigMarker(0, i)
+    if ok then
+      local qn = round(reaper.TimeMap2_timeToQN(0, timepos))
+      bpm = tonumber(bpm) or 0
+      if bpm <= 0 then bpm = reaper.TimeMap2_GetDividedBpmAtTime(0, timepos) end
+      bpm = round(bpm, 3)
+      if math.abs(previous - bpm) > 1e-6 then
+        result[#result + 1] = json.array({ qn, bpm })
+        previous = bpm
+      end
+    end
+  end
+  if #result == 0 or tonumber(result[1][1]) > 1e-6 then
+    result[#result + 1] = json.array({ 0, round(initial, 3) })
+    table.sort(result, row_less)
+  end
+  return result
+end
+
+function M:read_sig_map()
+  local result = json.array({})
+  local initial_num, initial_den = reaper.TimeMap_GetTimeSigAtTime(0, 0)
+  local previous_num, previous_den = initial_num, initial_den
+  local count = reaper.CountTempoTimeSigMarkers(0)
+  for i = 0, count - 1 do
+    local ok, timepos, _, _, _, num, den = reaper.GetTempoTimeSigMarker(0, i)
+    if ok then
+      local qn = round(reaper.TimeMap2_timeToQN(0, timepos))
+      num, den = math.floor(tonumber(num) or 0), math.floor(tonumber(den) or 0)
+      if num <= 0 then num = previous_num or initial_num end
+      if den <= 0 then den = previous_den or initial_den end
+      if num ~= previous_num or den ~= previous_den then
+        result[#result + 1] = json.array({ qn, num, den })
+        previous_num, previous_den = num, den
+      end
+    end
+  end
+  if #result == 0 or tonumber(result[1][1]) > 1e-6 then
+    result[#result + 1] = json.array({ 0, initial_num, initial_den })
+    table.sort(result, row_less)
+  end
+  return result
 end
 
 function M:read_items(tid, track, state, kind)
@@ -625,6 +701,141 @@ function M:set_tempo(bpm, num, den)
   reaper.UpdateTimeline()
 end
 
+local function normalize_points(value, width, defaults)
+  local points, by_qn = {}, {}
+  if type(value) == "table" then
+    for _, row in ipairs(value) do
+      if type(row) == "table" then
+        local qn = tonumber(row[1])
+        if qn then
+          qn = round(qn)
+          local p = { qn }
+          for i = 2, width do p[i] = tonumber(row[i]) end
+          by_qn[time_key(qn)] = p
+        end
+      end
+    end
+  end
+  for _, p in pairs(by_qn) do points[#points + 1] = p end
+  for _, p in ipairs(points) do
+    for i = 2, width do
+      if p[i] == nil then p[i] = defaults[i] end
+    end
+  end
+  table.sort(points, row_less)
+  if #points == 0 or math.abs(points[1][1]) > 1e-6 then
+    local p = { 0 }
+    for i = 2, width do p[i] = defaults[i] end
+    points[#points + 1] = p
+    table.sort(points, row_less)
+  end
+  return points
+end
+
+local function map_value(points, qn, fallback, index)
+  local result = fallback
+  for _, p in ipairs(points or {}) do
+    if p[1] <= qn + 1e-7 and p[index] ~= nil then result = p[index] else break end
+  end
+  return result
+end
+
+local function map_positions()
+  local items, markers = {}, {}
+  for i = 0, reaper.CountMediaItems(0) - 1 do
+    local item = reaper.GetMediaItem(0, i)
+    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+    items[#items + 1] = { item, reaper.TimeMap2_timeToQN(0, pos), reaper.TimeMap2_timeToQN(0, pos + len) }
+  end
+  local count = reaper.GetNumRegionsOrMarkers(0)
+  for i = 0, count - 1 do
+    local _, isrgn, pos, _, name, id, color = reaper.EnumProjectMarkers3(0, i)
+    if not isrgn then
+      markers[#markers + 1] = { id, reaper.TimeMap2_timeToQN(0, pos), name or "", color or 0 }
+    end
+  end
+  return items, markers
+end
+
+local function restore_positions(items, markers)
+  for _, it in ipairs(items) do
+    local s = reaper.TimeMap2_QNToTime(0, it[2])
+    reaper.SetMediaItemInfo_Value(it[1], "D_POSITION", s)
+    reaper.SetMediaItemInfo_Value(it[1], "D_LENGTH", reaper.TimeMap2_QNToTime(0, it[3]) - s)
+  end
+  for _, m in ipairs(markers) do
+    local at = reaper.TimeMap2_QNToTime(0, m[2])
+    reaper.SetProjectMarker3(0, m[1], false, at, at, m[3], m[4])
+  end
+end
+
+-- Replace the tempo/time-signature map while keeping existing item and marker
+-- positions in QN.  The shared protocol has separate tempo_map and sig_map;
+-- preserve the other map by taking its effective value at every union point.
+function M:set_tempo_map(value, sig_value)
+  local old_tempo = self:read_tempo_map()
+  local old_sig = self:read_sig_map()
+  local tempo = normalize_points(value, 2, { [2] = map_value(old_tempo, 0, 120, 2) })
+  local sig = normalize_points(sig_value or old_sig, 3, {
+    [2] = map_value(old_sig, 0, 4, 2), [3] = map_value(old_sig, 0, 4, 3)
+  })
+  local qns = {}
+  for _, p in ipairs(tempo) do qns[time_key(p[1])] = p[1] end
+  for _, p in ipairs(sig) do qns[time_key(p[1])] = p[1] end
+  local union = {}
+  for _, qn in pairs(qns) do union[#union + 1] = qn end
+  table.sort(union)
+
+  local items, markers = map_positions()
+  local bpm0 = map_value(tempo, 0, 120, 2)
+  local num0 = math.floor(map_value(sig, 0, 4, 2))
+  local den0 = math.floor(map_value(sig, 0, 4, 3))
+  local count = reaper.CountTempoTimeSigMarkers(0)
+  if count == 0 then
+    reaper.SetTempoTimeSigMarker(0, -1, 0, -1, -1, bpm0, num0, den0, false)
+  else
+    reaper.SetTempoTimeSigMarker(0, 0, 0, -1, -1, bpm0, num0, den0, false)
+    for i = count - 1, 1, -1 do reaper.DeleteTempoTimeSigMarker(0, i) end
+  end
+  for _, qn in ipairs(union) do
+    if qn > 1e-6 then
+      local bpm = map_value(tempo, qn, bpm0, 2)
+      local num = math.floor(map_value(sig, qn, num0, 2))
+      local den = math.floor(map_value(sig, qn, den0, 3))
+      local at = reaper.TimeMap2_QNToTime(0, qn)
+      reaper.SetTempoTimeSigMarker(0, -1, at, -1, -1, bpm, num, den, false)
+    end
+  end
+  restore_positions(items, markers)
+  reaper.UpdateTimeline()
+end
+
+function M:set_sig_map(value)
+  -- Rebuilding through set_tempo_map preserves the existing tempo points.
+  self:set_tempo_map(self:read_tempo_map(), value)
+end
+
+function M:set_locators(value)
+  if type(value) ~= "table" then return end
+  local old = {}
+  local count = reaper.GetNumRegionsOrMarkers(0)
+  for i = count - 1, 0, -1 do
+    local _, isrgn, _, _, _, id = reaper.EnumProjectMarkers3(0, i)
+    if not isrgn then old[#old + 1] = id end
+  end
+  for _, id in ipairs(old) do reaper.DeleteProjectMarker(0, id, false) end
+  for _, row in ipairs(value) do
+    if type(row) == "table" and tonumber(row[1]) then
+      local qn = tonumber(row[1])
+      local name = type(row[2]) == "string" and row[2] or ""
+      local at = reaper.TimeMap2_QNToTime(0, qn)
+      reaper.AddProjectMarker2(0, false, at, at, name, -1, 0)
+    end
+  end
+  reaper.UpdateTimeline()
+end
+
 -- ---------------------------------------------------------------- apply
 
 -- 届いた変更を反映する。pending: key -> 送ったがまだ戻ってきていない変更それぞれの「変えた項目」の集合（"*" は全部）
@@ -716,7 +927,16 @@ end
 function M:apply_one(key, value)
   if value == json.null then value = nil end
   local p = split(key)
-  if key == "tempo" then
+  if key == "locators" then
+    if value ~= nil then self:set_locators(value) end
+    return true
+  elseif key == "tempo_map" then
+    if value ~= nil then self:set_tempo_map(value) end
+    return true
+  elseif key == "sig_map" then
+    if value ~= nil then self:set_sig_map(value) end
+    return true
+  elseif key == "tempo" then
     local num, den = reaper.TimeMap_GetTimeSigAtTime(0, 0)
     self:set_tempo_keeping_items(value or 120, num, den)
     return true
@@ -769,19 +989,9 @@ end
 
 -- テンポを変えても、アイテムの位置・長さは拍のまま（Live と同じ）にする
 function M:set_tempo_keeping_items(bpm, num, den)
-  local items = {}
-  for i = 0, reaper.CountMediaItems(0) - 1 do
-    local item = reaper.GetMediaItem(0, i)
-    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
-    local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
-    items[#items + 1] = { item, reaper.TimeMap2_timeToQN(0, pos), reaper.TimeMap2_timeToQN(0, pos + len) }
-  end
+  local items, markers = map_positions()
   self:set_tempo(bpm, num, den)
-  for _, it in ipairs(items) do
-    local s = reaper.TimeMap2_QNToTime(0, it[2])
-    reaper.SetMediaItemInfo_Value(it[1], "D_POSITION", s)
-    reaper.SetMediaItemInfo_Value(it[1], "D_LENGTH", reaper.TimeMap2_QNToTime(0, it[3]) - s)
-  end
+  restore_positions(items, markers)
 end
 
 -- ---------------------------------------------------------------- tracks
