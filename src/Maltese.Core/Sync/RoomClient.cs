@@ -45,6 +45,8 @@ public sealed class RoomClient : IAsyncDisposable
     /// <summary>Live から来た自分の変更がサーバーを一周して戻ってきた</summary>
     public event Action<IReadOnlyList<Op>>? Echoed;
     public event Action<IReadOnlyList<Peer>>? PeersChanged;
+    /// <summary>ルーム内に表示する一時的なアクティビティ（状態には保存しない）</summary>
+    public event Action<int, string, string, string>? ActivityReceived;
     /// <summary>
     /// 参加が認められ、ルームの今の状態が届いた。この後に届く変更（RemoteOps）より必ず先に呼ばれるので、
     /// ここで状態を受け取れば、参加の途中で届いた変更を取りこぼさない。
@@ -89,6 +91,14 @@ public sealed class RoomClient : IAsyncDisposable
             _inFlight.Enqueue((fromLive, ops.Select(o => o.Key).ToArray()));
             _connection.Send(new JsonObject { ["t"] = "ops", ["ops"] = Op.ToArray(ops) });
         }
+    }
+
+    /// <summary>参加中の全員へ一時的なアクティビティを送る。</summary>
+    public void SendActivity(string kind, string asset)
+    {
+        if (_connection is null) return;
+        lock (_gate)
+            _connection.Send(new JsonObject { ["t"] = "activity", ["kind"] = kind, ["asset"] = asset });
     }
 
     private async Task ReadLoopAsync(IMessageConnection connection)
@@ -145,6 +155,12 @@ public sealed class RoomClient : IAsyncDisposable
                 {
                     RemoteOps?.Invoke((string?)msg["name"] ?? "?", ops);
                 }
+                break;
+            case "activity":
+                var kind = (string?)msg["kind"] ?? "";
+                var asset = (string?)msg["asset"] ?? "";
+                if (kind.Length <= 32 && asset.Length <= 64)
+                    ActivityReceived?.Invoke((int?)msg["from"] ?? 0, (string?)msg["name"] ?? "?", kind, asset);
                 break;
             case "error":
                 reason = (string?)msg["msg"] ?? reason;

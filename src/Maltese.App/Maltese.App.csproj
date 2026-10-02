@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Maltese</AssemblyName>
     <Product>Maltese</Product>
-    <Version>0.6.2</Version>
+    <Version>0.6.3</Version>
     <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
@@ -40,5 +40,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Maltese.Core\Maltese.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\114514.png" />
   </ItemGroup>
 </Project>

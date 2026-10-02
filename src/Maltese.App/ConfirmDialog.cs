@@ -19,7 +19,7 @@ public static class ConfirmDialog
             ShowInTaskbar = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
-        var okButton = new Button { Content = ok, Classes = { "accent" }, Padding = new Thickness(18, 8) };
+        var okButton = new Button { Content = ok, Padding = new Thickness(18, 8) };
         var cancelButton = new Button { Content = cancel, Padding = new Thickness(18, 8) };
         okButton.Click += (_, _) => dialog.Close(true);
         cancelButton.Click += (_, _) => dialog.Close(false);
@@ -79,7 +79,6 @@ public static class ConfirmDialog
                     },
                 },
             };
-            if (i == 0) button.Classes.Add("accent");
             button.Click += (_, _) => dialog.Close(index);
             panel.Children.Add(button);
         }

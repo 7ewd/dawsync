@@ -5,7 +5,8 @@ namespace Maltese.Core.Sync;
 
 public enum ActivityKind { Self, Remote, System, Warning }
 
-public sealed record ActivityEntry(DateTime Time, ActivityKind Kind, string Who, string Text, string? Key = null);
+public sealed record ActivityEntry(DateTime Time, ActivityKind Kind, string Who, string Text, string? Key = null,
+    string? ImageAsset = null);
 
 /// <summary>同期の操作（キーと値）を人が読める日本語にする。キーの意味は RemoteScript/model.py の先頭を参照。</summary>
 public static class OpDescriber

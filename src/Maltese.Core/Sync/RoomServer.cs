@@ -243,6 +243,26 @@ public sealed class RoomServer : IAsyncDisposable
                         foreach (var c in room!.Clients) c.Connection.Send((JsonObject)message.DeepClone());
                     }
                 }
+                else if (kind == "activity")
+                {
+                    // アクティビティはルーム状態に保存しない一時イベント。許可した種類と
+                    // サイズだけを中継し、任意のデータをルームに流せないようにする。
+                    var activityKind = (string?)msg["kind"] ?? "";
+                    var asset = (string?)msg["asset"] ?? "";
+                    if (activityKind != "image" || asset != "114514") continue;
+                    lock (_gate)
+                    {
+                        var message = new JsonObject
+                        {
+                            ["t"] = "activity",
+                            ["from"] = client.Id,
+                            ["name"] = client.Name,
+                            ["kind"] = activityKind,
+                            ["asset"] = asset,
+                        };
+                        foreach (var c in room!.Clients) c.Connection.Send((JsonObject)message.DeepClone());
+                    }
+                }
             }
         }
         catch (Exception e) when (e is not OutOfMemoryException)

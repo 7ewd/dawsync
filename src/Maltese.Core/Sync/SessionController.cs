@@ -200,6 +200,7 @@ public sealed class SessionController : IAsyncDisposable
         _liveSynced = false;
         var client = new RoomClient();
         client.RemoteOps += OnRemoteOps;
+        client.ActivityReceived += OnRoomActivity;
         client.Echoed += ops =>
         {
             Trace("echo", ops);
@@ -942,6 +943,21 @@ public sealed class SessionController : IAsyncDisposable
         _incoming.Writer.TryWrite(new RemoteBatch(ops.ToList()));
     }
 
+    private void OnRoomActivity(int from, string who, string kind, string asset)
+    {
+        if (kind != "image" || asset != "114514") return;
+        var activityKind = from == (_client?.MyId ?? 0) ? ActivityKind.Self : ActivityKind.Remote;
+        Log(activityKind, who, "", null, asset);
+    }
+
+    /// <summary>合言葉入力の隠しイベント。画像自体はアプリに同梱し、ルームには識別子だけを送る。</summary>
+    public bool BroadcastSecretImage()
+    {
+        if (_client is not { } client || !CanSend) return false;
+        client.SendActivity("image", "114514");
+        return true;
+    }
+
     private async Task IncomingLoopAsync()
     {
         await foreach (var item in _incoming.Reader.ReadAllAsync(_cts.Token))
@@ -1054,8 +1070,8 @@ public sealed class SessionController : IAsyncDisposable
         catch (Exception) { }  // 調べるための書き出しの失敗で、受信などを止めない
     }
 
-    private void Log(ActivityKind kind, string who, string text, string? key = null) =>
-        Activity?.Invoke(new ActivityEntry(DateTime.Now, kind, who, text, key));
+    private void Log(ActivityKind kind, string who, string text, string? key = null, string? imageAsset = null) =>
+        Activity?.Invoke(new ActivityEntry(DateTime.Now, kind, who, text, key, imageAsset));
 
     private void SaveApiReport(JsonObject report)
     {

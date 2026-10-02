@@ -14,6 +14,14 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        LanguageBox.SelectionChanged += (_, _) =>
+        {
+            if (LanguageBox.SelectedIndex < 0) return;
+            SessionPage.SetLanguage(LanguageBox.SelectedIndex == 1 ? AppLanguage.Japanese : AppLanguage.English);
+            LanguageLabel.Text = Localization.Get("language", SessionPage.Language);
+        };
+        LanguageBox.SelectedIndex = SessionPage.Language == AppLanguage.Japanese ? 1 : 0;
+        LanguageLabel.Text = Localization.Get("language", SessionPage.Language);
     }
 
     /// <summary>開発用: 画面を PNG に書き出す。</summary>

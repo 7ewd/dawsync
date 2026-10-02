@@ -10,21 +10,23 @@ using Avalonia.Controls;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Maltese.Core.Sync;
 
 namespace Maltese.App;
 
-public sealed class PeerVm(Peer peer, bool isMe)
+public sealed class PeerVm(Peer peer, bool isMe, AppLanguage language)
 {
     public string Name => peer.Name;
     public string Initial => peer.Name.Length > 0 ? peer.Name[..1].ToUpperInvariant() : "?";
-    public string Tag => isMe ? "（あなた）" : "";
+    public string Tag => isMe ? Localization.Get("you", language) : "";
     public IBrush Color => SessionView.PeerBrush(peer.Id);
 }
 
-public sealed record AddressVm(string Address, string Label);
+public sealed record AddressVm(string Address, string Label, string CopyText);
 
 public sealed class ActivityVm : INotifyPropertyChanged
 {
@@ -37,6 +39,8 @@ public sealed class ActivityVm : INotifyPropertyChanged
     public DateTime Time { get => _time; set { Set(ref _time, value); OnChanged(nameof(TimeText)); } }
     public string TimeText => Time.ToString("HH:mm:ss");
     public bool IsWarning => Kind == ActivityKind.Warning;
+    public Bitmap? Image { get; init; }
+    public bool HasImage => Image is not null;
 
     private string _text = "";
     private DateTime _time;
@@ -59,10 +63,13 @@ public partial class SessionView : UserControl
 
     public static IBrush PeerBrush(int id) => Palette.Solid(PeerColors[Math.Abs(id) % PeerColors.Length]);
 
+    private static Bitmap? _secretImage;
+
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly SessionController _session;
     private readonly ObservableCollection<ActivityVm> _activity = [];
     private readonly DispatcherTimer _environmentTimer;
+    private AppLanguage _language;
     private string? _bridgeError;
     private bool _howToShownOnce;
 
@@ -85,6 +92,8 @@ public partial class SessionView : UserControl
         var (files, samplesWarning) = OpenFileStore(_settings.SamplesFolder);
         _session = new SessionController(files);
         InitializeComponent();
+        _language = _settings.Language;
+        ApplyLanguage();
         ActivityList.ItemsSource = _activity;
         NameBox.Text = _settings.Name ?? Environment.UserName;
         AddressBox.Text = _settings.LastAddress;
@@ -148,6 +157,9 @@ public partial class SessionView : UserControl
             }
         };
         ClearButton.Click += (_, _) => { _activity.Clear(); Refresh(); };
+        NameBox.TextChanged += (_, _) => CheckSecretInput(NameBox.Text);
+        AddressBox.TextChanged += (_, _) => CheckSecretInput(AddressBox.Text);
+        KeyBox.TextChanged += (_, _) => CheckSecretInput(KeyBox.Text);
 
         UpdateEnvironmentNow();
         _environmentTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
@@ -161,6 +173,57 @@ public partial class SessionView : UserControl
     {
         _environmentTimer.Stop();
         return _session.DisposeAsync();
+    }
+
+    /// <summary>The language currently used by the window. MainWindow binds its selector to this value.</summary>
+    public AppLanguage Language => _language;
+
+    public void SetLanguage(AppLanguage language)
+    {
+        if (_language == language) return;
+        _language = language;
+        _settings.Language = language;
+        _settings.Save();
+        ApplyLanguage();
+        Refresh();
+    }
+
+    private string T(string key) => Localization.Get(key, _language);
+
+    /// <summary>Apply all labels that are not data-bound. Runtime status text is refreshed separately.</summary>
+    private void ApplyLanguage()
+    {
+        DawStep.Text = T("daw_step");
+        RoomStep.Text = T("room_step");
+        HowToToggle.Content = HowToPanel.IsVisible ? T("how_to_close") : T("how_to_open");
+        HowLive1.Text = T("live_1");
+        HowLive2.Text = T("live_2");
+        HowLive3.Text = T("live_3");
+        HowBitwig1.Text = T("bitwig_1");
+        HowBitwig2.Text = T("bitwig_2");
+        HowReaper1.Text = T("reaper_1");
+        HowReaper2.Text = T("reaper_2");
+        NameLabel.Text = T("your_name");
+        NameBox.PlaceholderText = T("name_placeholder");
+        HostButton.Content = T("create_room");
+        OrText.Text = T("or");
+        AddressBox.PlaceholderText = T("invite_placeholder");
+        KeyBox.PlaceholderText = T("key_placeholder");
+        JoinButton.Content = T("join");
+        PublishButton.Content = T("publish");
+        PublishedInviteText.Text = T("published_invite");
+        CopyPublicButton.Content = T("copy");
+        UnpublishButton.Content = T("unpublish");
+        KeyLabel.Text = T("passphrase");
+        CopyInviteButton.Content = T("copy_invite");
+        LeaveButton.Content = T("leave");
+        SamplesStep.Text = T("samples");
+        OpenSamplesButton.Content = T("open");
+        ChangeSamplesButton.Content = T("change");
+        ResyncButton.Content = T("resync");
+        OverwriteButton.Content = T("overwrite");
+        ActivityTitle.Text = T("activity");
+        ClearButton.Content = T("clear");
     }
 
     // 起動引数（--host / --join アドレス）から使う
@@ -220,17 +283,13 @@ public partial class SessionView : UserControl
     {
         if (TopLevel.GetTopLevel(this) is not Window window) return 0;
         var shortcut = OperatingSystem.IsMacOS() ? "Cmd+N" : "Ctrl+N";
-        return await ConfirmDialog.ChooseAsync(window, "ルームの始め方",
+        return await ConfirmDialog.ChooseAsync(window, T("host_start_title"),
             "",
             [
-                ("まっさらから始める",
-                 "今開いているセットのトラック・クリップ・リターンなどを消して、トラック 1 本だけの状態から始めます。" +
-                 $"大事なセットを開いている場合は、先に保存してから新規セット（{shortcut}）を開いてください。"),
-                ("今のセットの続きから始める",
-                 "今開いているセットの内容（トラック・クリップ・ノート・サンプル）をそのままルームに入れます。" +
-                 "参加する人のセットはこの内容になります（音源・エフェクトは同期されないので、各自でかけてください）。"),
+                (T("start_blank"), string.Format(T("start_blank_detail"), shortcut)),
+                (T("start_current"), T("start_current_detail")),
             ],
-            "やめる");
+            T("cancel"));
     }
 
     private async Task<bool> ConfirmBlankAsync()
@@ -238,11 +297,9 @@ public partial class SessionView : UserControl
         if (TopLevel.GetTopLevel(this) is not Window window) return true;
         var shortcut = OperatingSystem.IsMacOS() ? "Cmd+N" : "Ctrl+N";
         return await ConfirmDialog.AskAsync(window,
-            "セットをまっさらにします",
-            "Live・Bitwig・REAPER で今開いているセット（プロジェクト）のトラック・クリップ・リターンなどを消して、" +
-            "トラック 1 本だけの状態にしてから始めます。\n\n" +
-            $"大事なセットを開いている場合は、先に保存してから新規セット（{shortcut}）を開いてください。",
-            "まっさらにして始める", "やめる");
+            T("blank_confirm_title"),
+            string.Format(T("blank_confirm_detail"), shortcut),
+            T("start_blank_action"), T("cancel"));
     }
     public Task JoinAsync(string address, string? key)
     {
@@ -507,7 +564,7 @@ public partial class SessionView : UserControl
     private void ShowHowTo(bool show)
     {
         HowToPanel.IsVisible = show;
-        HowToToggle.Content = show ? "つなぎ方を閉じる ▴" : "つなぎ方を見る ▾";
+        HowToToggle.Content = show ? T("how_to_close") : T("how_to_open");
     }
 
     private void ShowRoomError(string message)
@@ -726,10 +783,10 @@ public partial class SessionView : UserControl
         if (_bridgeError is not null)
             SetStatus(LiveDot, LiveStatus, Palette.Red, _bridgeError);
         else if (live.IsConnected)
-            SetStatus(LiveDot, LiveStatus, Palette.Green, $"{live.DawName} とつながっています" +
-                (live.WaitingDaw is { } waiting ? $"（{waiting} は待っています）" : ""));
+            SetStatus(LiveDot, LiveStatus, Palette.Green, $"{live.DawName}{T("connected")}" +
+                (live.WaitingDaw is { } waiting ? _language == AppLanguage.Japanese ? $"（{waiting}{T("waiting_daw")}）" : $" ({waiting}{T("waiting_daw")})" : ""));
         else
-            SetStatus(LiveDot, LiveStatus, Palette.Amber, "Ableton Live・Bitwig・REAPER のどれかを待っています…");
+            SetStatus(LiveDot, LiveStatus, Palette.Amber, T("waiting"));
 
         // つながっていれば手順は不要（古いスクリプトのときだけ更新を促す）
         HowToToggle.IsVisible = !live.IsConnected;
@@ -742,24 +799,24 @@ public partial class SessionView : UserControl
         (InstallButton.Content, InstallButton.IsVisible) = scriptState switch
         {
             _ when !livePresent => ("", false),
-            ScriptInstallState.NotInstalled => ("Live にスクリプトを入れる", true),
-            ScriptInstallState.Outdated => ("Live のスクリプトを更新する（そのあと Live を再起動）", true),
+            ScriptInstallState.NotInstalled => (T("live_install"), true),
+            ScriptInstallState.Outdated => (T("live_update"), true),
             _ => ("", false),
         };
         var reaperState = install.Reaper;
         (ReaperInstallButton.Content, ReaperInstallButton.IsVisible) = reaperState switch
         {
             _ when !reaperPresent => ("", false),
-            ScriptInstallState.NotInstalled => ("REAPER にスクリプトを入れる", true),
-            ScriptInstallState.Outdated => ("REAPER のスクリプトを更新する（そのあと REAPER を再起動）", true),
+            ScriptInstallState.NotInstalled => (T("reaper_install"), true),
+            ScriptInstallState.Outdated => (T("reaper_update"), true),
             _ => ("", false),
         };
         var bitwigState = install.Bitwig;
         (BitwigInstallButton.Content, BitwigInstallButton.IsVisible) = bitwigState switch
         {
             _ when !bitwigPresent => ("", false),
-            ScriptInstallState.NotInstalled => ("Bitwig に拡張を入れる", true),
-            ScriptInstallState.Outdated => ("Bitwig の拡張を更新する", true),
+            ScriptInstallState.NotInstalled => (T("bitwig_install"), true),
+            ScriptInstallState.Outdated => (T("bitwig_update"), true),
             _ => ("", false),
         };
         if ((scriptState == ScriptInstallState.NotInstalled || bitwigPresent && bitwigState == ScriptInstallState.NotInstalled
@@ -773,12 +830,14 @@ public partial class SessionView : UserControl
         // ② ルーム
         JoinPanel.IsVisible = !_session.InRoom;
         InRoomPanel.IsVisible = _session.InRoom;
+        if (_secretImagePending && _session.InRoom && _session.BroadcastSecretImage())
+            _secretImagePending = false;
         HostInfo.IsVisible = _session.IsHost;
         // ホストしていなければ、公開の途中経過や失敗の表示は消しておく（次にルームを作ったときに残らないように）
         if (!_session.IsHost) PublishStatus.IsVisible = false;
         if (_session.InRoom)
         {
-            RoomTitle.Text = _session.IsHost ? "ルームを開いています" : $"参加中: {_session.RoomAddress}";
+            RoomTitle.Text = _session.IsHost ? T("room_open") : $"{T("joined")}{_session.RoomAddress}";
             var port = _session.HostPort ?? RoomServer.DefaultPort;
             KeyText.Text = _session.RoomKey;
             var published = _session.PublicAddress is not null;
@@ -789,7 +848,10 @@ public partial class SessionView : UserControl
             var addresses = _localAddresses
                 .Select(a => new AddressVm(
                     port == RoomServer.DefaultPort ? a : $"{a}:{port}",
-                    a.StartsWith("100.", StringComparison.Ordinal) ? "Tailscale 用" : "同じ Wi-Fi 用"))
+                    a.StartsWith("100.", StringComparison.Ordinal)
+                        ? _language == AppLanguage.Japanese ? "Tailscale 用" : "For Tailscale"
+                        : _language == AppLanguage.Japanese ? "同じ Wi-Fi 用" : "Same Wi-Fi",
+                    T("copy")))
                 .ToList();
             if (!addresses.SequenceEqual(_shownAddresses))
             {
@@ -800,20 +862,21 @@ public partial class SessionView : UserControl
 
         // 参加者
         PeersCard.IsVisible = _session.InRoom;
-        PeersTitle.Text = $"参加者（{_session.Peers.Count} 人）";
-        PeerList.ItemsSource = _session.Peers.Select(p => new PeerVm(p, p.Id == _session.MyId)).ToList();
+        PeersTitle.Text = Localization.Count("participant", "参加者", _session.Peers.Count, _language);
+        PeerList.ItemsSource = _session.Peers.Select(p => new PeerVm(p, p.Id == _session.MyId, _language)).ToList();
 
         // 状態バナー
         var (color, title, detail, resync) =
-            !_session.InRoom ? (Palette.Gray, "ルームに入っていません", "", false)
-            : _session.Reconnecting ? (Palette.Amber, "ルームにつなぎ直しています…",
-                "通信が切れました。この間の変更は、つながったらルームに送ります", false)
+            !_session.InRoom ? (Palette.Gray, T("not_in_room"), "", false)
+            : _session.Reconnecting ? (Palette.Amber, T("reconnecting"),
+                T("reconnecting_detail"), false)
             : _session.PausedReason is { } reason ? (Palette.Red, "同期を止めています", reason, true)
-            : !live.IsConnected ? (Palette.Amber, "Ableton Live / Bitwig / REAPER がつながっていません", "", false)
-            : _session.WaitingForHost ? (Palette.Amber, "ホストを待っています", "", false)
-            : (Palette.Green, "同時編集中", "", false);
-        Banner.Background = Palette.Tint(color, 0x1F);
-        Banner.BorderBrush = Palette.Tint(color, 0x66);
+            : !live.IsConnected ? (Palette.Amber, T("disconnected"), "", false)
+            : _session.WaitingForHost ? (Palette.Amber, T("waiting_host"), "", false)
+            : (Palette.Green, T("editing"), "", false);
+        // テーマは黒地と白い細線で統一し、状態は左のドットで示す。
+        Banner.Background = Palette.Solid(Color.Parse("#000000"));
+        Banner.BorderBrush = Palette.Solid(Color.Parse("#FFFFFF"));
         BannerDot.Fill = Palette.Solid(color);
         BannerTitle.Text = title;
         BannerDetail.Text = detail;
@@ -833,7 +896,7 @@ public partial class SessionView : UserControl
     {
         var who = e.Kind switch
         {
-            ActivityKind.System or ActivityKind.Warning => "お知らせ",
+            ActivityKind.System or ActivityKind.Warning => T("notice"),
             _ => e.Who,
         };
 
@@ -863,14 +926,48 @@ public partial class SessionView : UserControl
             },
             Text = e.Text,
             Time = e.Time,
+            Image = e.ImageAsset == "114514" ? SecretImage() : null,
         });
         while (_activity.Count > 300) _activity.RemoveAt(_activity.Count - 1);
+    }
+
+    private bool _secretInputLatched;
+    private bool _secretImagePending;
+
+    private void CheckSecretInput(string? value)
+    {
+        var hit = value is "１１４５１４" or "114514";
+        if (!hit)
+        {
+            _secretInputLatched = false;
+            return;
+        }
+        if (_secretInputLatched) return;
+        _secretInputLatched = true;
+        if (!_session.BroadcastSecretImage()) _secretImagePending = true;
+    }
+
+    private static Bitmap? SecretImage()
+    {
+        if (_secretImage is not null) return _secretImage;
+        try
+        {
+            using var stream = AssetLoader.Open(new Uri("avares://Maltese.App/Assets/114514.png"));
+            return _secretImage = new Bitmap(stream);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            ErrorLog.Write("SecretImage", e);
+            return null;
+        }
     }
 }
 
 /// <summary>名前と最後に参加したアドレスを覚えておく。</summary>
 public sealed class AppSettings
 {
+    /// <summary>Language selected in the UI. New installs follow the OS language.</summary>
+    public AppLanguage Language { get; set; } = Localization.SystemDefault;
     public string? Name { get; set; }
     public string? LastAddress { get; set; }
     public string? LastKey { get; set; }
