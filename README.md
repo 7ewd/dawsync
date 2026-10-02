@@ -1,8 +1,8 @@
 # DAW Sync
 
-![DAW Sync logo](assets/DAW-Sync-logo-vtuber.png)
+<img src="assets/DAW-Sync-logo-vtuber.png" alt="DAW Sync logo" width="50%">
 
-![DAW Sync supported DAWs poster](assets/DAW-Sync-poster.png)
+<img src="assets/DAW-Sync-poster.png" alt="DAW Sync supported DAWs poster" width="50%">
 
 [English](README_en.md) / [日本語](README_ja.md)
 
