@@ -1,5 +1,5 @@
 """
-モックの Live 1 台と、本物の Bitwig（AbletonMulti 拡張を入れて起動しておく）で同時編集を確かめる。
+モックの Live 1 台と、本物の Bitwig（Maltese 拡張を入れて起動しておく）で同時編集を確かめる。
 
   python tests/bitwig/live_bitwig.py            自動のテスト（Live → Bitwig、Bitwig の状態は拡張のデバッグ出力で見る）
   python tests/bitwig/live_bitwig.py --watch 300 テストの後、300 秒間つないだままにして Live 側の状態を
@@ -17,18 +17,18 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "tests", "sim", "mock_live"))
-sys.path.insert(0, os.path.join(ROOT, "src", "AbletonMulti.Core", "RemoteScript"))
+sys.path.insert(0, os.path.join(ROOT, "src", "Maltese.Core", "RemoteScript"))
 
 import Live  # noqa: E402  (モック)
-from AbletonMulti import multi  # noqa: E402
+from Maltese import multi  # noqa: E402
 
 LOGS = os.path.join(HERE, "logs")
-BW_DIR = os.path.join(tempfile.gettempdir(), "bitwig", "abletonmulti-bitwig")
+BW_DIR = os.path.join(tempfile.gettempdir(), "bitwig", "maltese-bitwig")
 STATE = os.path.join(BW_DIR, "state.json")
 PORT_FILE = os.path.join(BW_DIR, "port")
 BITWIG_TEST_PORT = 47490
 BW_LOG = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Bitwig Studio", "BitwigStudio.log")
-CLI = os.path.join(ROOT, "src", "AbletonMulti.Cli", "bin", "Debug", "net10.0", "AbletonMulti.Cli" + (".exe" if os.name == "nt" else ""))
+CLI = os.path.join(ROOT, "src", "Maltese.Cli", "bin", "Debug", "net10.0", "Maltese.Cli" + (".exe" if os.name == "nt" else ""))
 results = []
 
 
@@ -62,7 +62,7 @@ app = Live._App()
 app.browser = Live.Browser([])
 app.browser.song = song
 Live.Application.current = app
-script = multi.AbletonMulti(CInstance(song))
+script = multi.Maltese(CInstance(song))
 script._port = 47410
 
 
@@ -156,7 +156,7 @@ def main():
     if os.path.exists(STATE):
         os.remove(STATE)
 
-    build = subprocess.run(["dotnet", "build", os.path.join(ROOT, "src", "AbletonMulti.Cli"), "-v", "q", "-nologo"],
+    build = subprocess.run(["dotnet", "build", os.path.join(ROOT, "src", "Maltese.Cli"), "-v", "q", "-nologo"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
     if build.returncode != 0:
         print(build.stdout[-3000:])
@@ -169,7 +169,7 @@ def main():
         path = os.path.join(LOGS, "trace_%s.jsonl" % name)
         if os.path.exists(path):
             os.remove(path)
-        return dict(os.environ, ABLETONMULTI_TRACE=path)
+        return dict(os.environ, MALTESE_TRACE=path)
 
     host = subprocess.Popen([CLI, "session", "--host", "--name", "Live", "--bridge-port", "47410", "--port", "47411",
                              "--key", "BWTEST", "--samples", os.path.join(LOGS, "samples_live")],

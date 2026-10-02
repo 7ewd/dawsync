@@ -1,7 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/AbletonMulti.App/AbletonMulti.App.csproj" />
-    <Project Path="src/AbletonMulti.Cli/AbletonMulti.Cli.csproj" />
-    <Project Path="src/AbletonMulti.Core/AbletonMulti.Core.csproj" />
-  </Folder>
-</Solution>

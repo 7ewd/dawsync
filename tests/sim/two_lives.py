@@ -1,7 +1,7 @@
 """
 モックの Live 4 台（A・B・C・D）で同時編集を再現するテスト。
 
-事前に AbletonMulti.Cli を 4 つ起動しておく（run_sim.sh がやる）:
+事前に Maltese.Cli を 4 つ起動しておく（run_sim.sh がやる）:
   A: session --host  --bridge-port 47410 --port 47411 --key TEST42 --samples logs/samples_a
   B: session --join 127.0.0.1:47411 --key TEST42 --bridge-port 47420 --samples logs/samples_b
   C: 同上（途中から、同じセットで参加）
@@ -17,11 +17,11 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "mock_live"))
-sys.path.insert(0, os.path.join(HERE, "..", "..", "src", "AbletonMulti.Core", "RemoteScript"))
+sys.path.insert(0, os.path.join(HERE, "..", "..", "src", "Maltese.Core", "RemoteScript"))
 
 import Live  # noqa: E402  (モック)
-from AbletonMulti import model as model_module  # noqa: E402
-from AbletonMulti import multi  # noqa: E402
+from Maltese import model as model_module  # noqa: E402
+from Maltese import multi  # noqa: E402
 
 model_module.SYNC_DEVICES = os.environ.get("SYNC_DEVICES") == "1"
 SYNC = model_module.SYNC_DEVICES
@@ -59,7 +59,7 @@ class Side:
 
     def start(self):
         Live.Application.current = self.app
-        self.script = multi.AbletonMulti(CInstance(self.name, self.song))
+        self.script = multi.Maltese(CInstance(self.name, self.song))
         self.script._port = self.port
         original = self.script._warn
         self.script._warn = lambda m: (self.warnings.append(m), original(m))

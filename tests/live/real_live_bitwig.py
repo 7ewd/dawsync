@@ -2,11 +2,11 @@
 本物の Live と本物の Bitwig で同時編集を確かめる（画面・マウス・キーボードは使わない）。
 
   事前に:
-    Live   … 捨ててよいセットを開き、コントロールサーフェスで AbletonMulti を選んでおく（Remote Script は User Library に入れる）
-    Bitwig … 捨ててよいプロジェクトを開き、AbletonMulti の拡張を有効にしておく
+    Live   … 捨ててよいセットを開き、コントロールサーフェスで Maltese を選んでおく（Remote Script は User Library に入れる）
+    Bitwig … 捨ててよいプロジェクトを開き、Maltese の拡張を有効にしておく
   python tests/live/real_live_bitwig.py
 
-Live の Remote Script は、%TEMP%/abletonmulti-live/debug があるときだけテストから操作できる
+Live の Remote Script は、%TEMP%/maltese-live/debug があるときだけテストから操作できる
 （cmd.py を Live の中で実行し、state.json に今の状態を書く。port でつなぐ先のポートを変える）。
 Live の API ではクリップを動かす・端を動かすなどはできないので、それは Bitwig 側で行い、Live に反映されるかを見る。
 Live 側からは、ノートの追加・削除・移動、クリップの作成・削除・ループなど API でできる編集をする。
@@ -23,10 +23,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 LOGS = os.path.join(HERE, "logs")
-LIVE_DIR = os.path.join(tempfile.gettempdir(), "abletonmulti-live")
-BW_DIR = os.path.join(tempfile.gettempdir(), "bitwig", "abletonmulti-bitwig")
+LIVE_DIR = os.path.join(tempfile.gettempdir(), "maltese-live")
+BW_DIR = os.path.join(tempfile.gettempdir(), "bitwig", "maltese-bitwig")
 LIVE_PORT, BITWIG_PORT, ROOM_PORT = 47480, 47490, 47481
-CLI = os.path.join(ROOT, "src", "AbletonMulti.Cli", "bin", "Debug", "net10.0", "AbletonMulti.Cli" + (".exe" if os.name == "nt" else ""))
+CLI = os.path.join(ROOT, "src", "Maltese.Cli", "bin", "Debug", "net10.0", "Maltese.Cli" + (".exe" if os.name == "nt" else ""))
 results = []
 
 
@@ -151,7 +151,7 @@ def main():
     with open(os.path.join(LIVE_DIR, "port"), "w") as f:
         f.write("%d %d" % (LIVE_PORT, until))
 
-    build = subprocess.run(["dotnet", "build", os.path.join(ROOT, "src", "AbletonMulti.Cli"), "-v", "q", "-nologo"],
+    build = subprocess.run(["dotnet", "build", os.path.join(ROOT, "src", "Maltese.Cli"), "-v", "q", "-nologo"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
     if build.returncode != 0:
         print(build.stdout[-3000:])
@@ -163,14 +163,14 @@ def main():
         path = os.path.join(LOGS, "trace_%s.jsonl" % name)
         if os.path.exists(path):
             os.remove(path)
-        return dict(os.environ, ABLETONMULTI_TRACE=path)
+        return dict(os.environ, MALTESE_TRACE=path)
 
     procs = [subprocess.Popen([CLI, "session", "--host", "--name", "Live", "--bridge-port", str(LIVE_PORT), "--port", str(ROOM_PORT),
                                "--key", "REALTEST", "--samples", os.path.join(LOGS, "samples_live"), "--blank"],
                               stdout=open(os.path.join(LOGS, "app_live.txt"), "w"), stderr=subprocess.STDOUT, env=env("live"))]
     try:
         if not wait_until(lambda: "まっさら" in open(os.path.join(LOGS, "app_live.txt"), encoding="utf-8", errors="replace").read(), 40):
-            print("Live がつながりませんでした（AbletonMulti のコントロールサーフェスが選ばれているか確かめてください）")
+            print("Live がつながりませんでした（Maltese のコントロールサーフェスが選ばれているか確かめてください）")
             sys.exit(1)
         room = "127.0.0.1:%d" % ROOM_PORT
         if os.environ.get("LATENCY_MS"):

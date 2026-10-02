@@ -1,4 +1,4 @@
-# AbletonMulti
+# Maltese
 
 Ableton Live のプロジェクトを Mac / Windows 間で共同編集する試作ツールです。Bitwig Studio と REAPER も同じルームに参加できます。
 
@@ -14,7 +14,7 @@ Ableton Live のプロジェクトを Mac / Windows 間で共同編集する試�
 - `.als` のサンプル、プラグイン、Pack などの依存関係チェック
 
 ```text
-Live / Bitwig / REAPER ⇄ AbletonMulti ⇄ 共有ルーム
+Live / Bitwig / REAPER ⇄ Maltese ⇄ 共有ルーム
 ```
 
 ミキサー設定（音量、パン、センド、FX）は同期しません。試作版のため、重要なプロジェクトはバックアップして使用してください。
@@ -30,8 +30,8 @@ Live / Bitwig / REAPER ⇄ AbletonMulti ⇄ 共有ルーム
 .NET 10 SDK が必要です。Live / Bitwig / REAPER のテストには各アプリも必要です。
 
 ```bash
-dotnet run --project src/AbletonMulti.App -- path/to/project.als
-dotnet run --project src/AbletonMulti.Cli -- path/to/project.als --json out.json --hash
+dotnet run --project src/Maltese.App -- path/to/project.als
+dotnet run --project src/Maltese.Cli -- path/to/project.als --json out.json --hash
 bash tests/sim/run_sim.sh
 ```
 
@@ -49,16 +49,16 @@ bash tests/sim/run_sim.sh
 
 ### 構成
 
-- `src/AbletonMulti.Core` — `.als` 解析、同期処理、依存関係チェック
-- `src/AbletonMulti.App` — Avalonia デスクトップアプリ
-- `src/AbletonMulti.Cli` — CLI
+- `src/Maltese.Core` — `.als` 解析、同期処理、依存関係チェック
+- `src/Maltese.App` — Avalonia デスクトップアプリ
+- `src/Maltese.Cli` — CLI
 - `bitwig/bridge` — Bitwig 拡張（Java）
-- `reaper/AbletonMulti` — REAPER スクリプト（Lua）
+- `reaper/Maltese` — REAPER スクリプト（Lua）
 - `tests` — シミュレーションと連携テスト
 
 ## English
 
-AbletonMulti is an experimental tool for collaborative Ableton Live projects across macOS and Windows. Bitwig Studio and REAPER users can join the same room.
+Maltese is an experimental tool for collaborative Ableton Live projects across macOS and Windows. Bitwig Studio and REAPER users can join the same room.
 
 ### Features
 
@@ -80,8 +80,8 @@ Mixer settings (volume, pan, sends, and FX) are not synchronized. Back up import
 The .NET 10 SDK is required. Install the relevant DAW for Live / Bitwig / REAPER integration tests.
 
 ```bash
-dotnet run --project src/AbletonMulti.App -- path/to/project.als
-dotnet run --project src/AbletonMulti.Cli -- path/to/project.als --json out.json --hash
+dotnet run --project src/Maltese.App -- path/to/project.als
+dotnet run --project src/Maltese.Cli -- path/to/project.als --json out.json --hash
 bash tests/sim/run_sim.sh
 ```
 
@@ -99,11 +99,11 @@ Integration tests: `python tests/live/real_live_bitwig.py` and `python tests/rea
 
 ### Project layout
 
-- `src/AbletonMulti.Core` — `.als` parsing, sync logic, dependency checks
-- `src/AbletonMulti.App` — Avalonia desktop app
-- `src/AbletonMulti.Cli` — CLI
+- `src/Maltese.Core` — `.als` parsing, sync logic, dependency checks
+- `src/Maltese.App` — Avalonia desktop app
+- `src/Maltese.Cli` — CLI
 - `bitwig/bridge` — Bitwig extension (Java)
-- `reaper/AbletonMulti` — REAPER script (Lua)
+- `reaper/Maltese` — REAPER script (Lua)
 - `tests` — Simulation and integration tests
 
 ## License

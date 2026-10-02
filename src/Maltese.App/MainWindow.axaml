@@ -1,0 +1,23 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:Maltese.App"
+        x:Class="Maltese.App.MainWindow"
+        Title="Maltese"
+        Width="1100" Height="780" MinWidth="720" MinHeight="520"
+        WindowStartupLocation="CenterScreen">
+
+    <Grid RowDefinitions="Auto,*">
+        <Border Grid.Row="0" Padding="24,14" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource CardBorder}"
+                Background="{DynamicResource CardBackground}">
+            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                <Border Width="30" Height="30" CornerRadius="8" Background="#FF764D">
+                    <TextBlock Text="♪" Foreground="White" FontSize="17" FontWeight="Bold"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="Maltese" FontSize="18" FontWeight="Bold" VerticalAlignment="Center" />
+            </StackPanel>
+        </Border>
+
+        <local:SessionView Grid.Row="1" x:Name="SessionPage" />
+    </Grid>
+</Window>
