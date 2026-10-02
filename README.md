@@ -21,28 +21,6 @@ Mixer settings (volume, pan, sends, and FX) are not synchronized. Back up import
 2. Install the Live Remote Script, Bitwig extension, or REAPER script from the app.
 3. Share the invite code and start collaborating.
 
-## Development
-
-The .NET 10 SDK is required. Install the relevant DAW for Live / Bitwig / REAPER integration tests.
-
-```bash
-dotnet run --project src/Maltese.App -- path/to/project.als
-dotnet run --project src/Maltese.Cli -- path/to/project.als --json out.json --hash
-bash tests/sim/run_sim.sh
-```
-
-Integration tests: `python tests/live/real_live_bitwig.py` and `python tests/reaper/live_reaper.py`
-
-## Packaging
-
-```powershell
-./build/publish-windows.ps1
-```
-
-```bash
-./build/publish-macos.sh osx-arm64  # Intel Mac: osx-x64
-```
-
 ## Project layout
 
 - `src/Maltese.Core` — `.als` parsing, sync logic, dependency checks
@@ -54,4 +32,4 @@ Integration tests: `python tests/live/real_live_bitwig.py` and `python tests/rea
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

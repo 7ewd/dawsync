@@ -25,28 +25,6 @@ Live / Bitwig / REAPER ⇄ Maltese ⇄ 共有ルーム
 2. アプリから Live Remote Script、Bitwig 拡張、または REAPER スクリプトをインストールします。
 3. 招待コードを共有して共同編集を始めます。
 
-## 開発
-
-.NET 10 SDK が必要です。Live / Bitwig / REAPER のテストには各アプリも必要です。
-
-```bash
-dotnet run --project src/Maltese.App -- path/to/project.als
-dotnet run --project src/Maltese.Cli -- path/to/project.als --json out.json --hash
-bash tests/sim/run_sim.sh
-```
-
-実機連携テスト: `python tests/live/real_live_bitwig.py`、`python tests/reaper/live_reaper.py`
-
-## 配布
-
-```powershell
-./build/publish-windows.ps1
-```
-
-```bash
-./build/publish-macos.sh osx-arm64  # Intel Mac: osx-x64
-```
-
 ## 構成
 
 - `src/Maltese.Core` — `.als` 解析、同期処理、依存関係チェック
@@ -58,4 +36,4 @@ bash tests/sim/run_sim.sh
 
 ## ライセンス
 
-GPL-3.0。[LICENSE](LICENSE) を参照してください。
+MIT。[LICENSE](LICENSE) を参照してください。
