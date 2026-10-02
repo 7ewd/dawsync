@@ -1,10 +1,9 @@
 # DAW Sync
+[English](README_en.md) / [日本語](README_ja.md)
 
 ![DAW Sync logo](assets/DAW-Sync-logo-vtuber.png)
 
 ![DAW Sync supported DAWs poster](assets/DAW-Sync-poster.png)
-
-[English](README_en.md) / [日本語](README_ja.md)
 
 DAW Sync lets composers work together in real time<br>
 even across different OSs and DAWs<br>
