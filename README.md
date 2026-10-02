@@ -2,7 +2,7 @@
 
 Ableton Live のプロジェクトを Mac / Windows 間で共同編集する試作ツールです。Bitwig Studio と REAPER も同じルームに参加できます。
 
-[☕ Buy Me a Coffee](https://buymeacoffee.com/7ewd)
+<a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a>
 
 [日本語](#日本語) | [English](#english)
 
