@@ -20,7 +20,7 @@ DAW Sync は Ableton Live のプロジェクトを macOS / Windows / Linux 間�
 
 ## ダウンロード
 
-[Windows exe](https://github.com/7ewd/maltese/releases/download/v1.0/DawSync.exe) · [Windows zip](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/maltese/releases/download/v1.0/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0 リリース](https://github.com/7ewd/maltese/releases/tag/v1.0)
+[Windows exe](https://github.com/7ewd/dawsync/releases/download/v1.0/DawSync.exe) · [Windows zip](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0 リリース](https://github.com/7ewd/dawsync/releases/tag/v1.0)
 
 各 OS 版は自己完結型です。.NET のインストールや追加ランタイムは必要ありません。Live、Bitwig、REAPER 用の連携ファイルも含まれており、アプリからインストールできます。
 
