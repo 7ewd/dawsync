@@ -47,8 +47,6 @@ bash tests/sim/run_sim.sh
 ./build/publish-macos.sh osx-arm64  # Intel Mac: osx-x64
 ```
 
-GitHub に push すると `.github/workflows/build.yml` が Windows / macOS 版を自動ビルドします。
-
 ### 構成
 
 - `src/AbletonMulti.Core` — `.als` 解析、同期処理、依存関係チェック
@@ -98,8 +96,6 @@ Integration tests: `python tests/live/real_live_bitwig.py` and `python tests/rea
 ```bash
 ./build/publish-macos.sh osx-arm64  # Intel Mac: osx-x64
 ```
-
-Pushing to GitHub runs `.github/workflows/build.yml` to build Windows and macOS artifacts.
 
 ### Project layout
 
