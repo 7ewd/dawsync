@@ -4,7 +4,7 @@
 
 [English](README_en.md) / [日本語](README_ja.md)
 
-DAW Sync は Ableton Live のプロジェクトを macOS / Windows / Linux 間で共同編集するアプリです。Bitwig Studio と REAPER も同じルームに参加できます。
+DAW Sync は、異なる OS や DAW を使うコンポーザー同士が、制作環境の違いを越えてスムーズにコラボレーションできるように設計されたソフトウェアです。
 
 <a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a>
 

@@ -4,7 +4,7 @@
 
 [English](README_en.md) / [日本語](README_ja.md)
 
-DAW Sync lets Ableton Live users collaborate across macOS, Windows, and Linux. Bitwig Studio and REAPER users can join the same room.
+DAW Sync is designed to make collaboration easy for composers working across different operating systems and DAWs, regardless of their production setup.
 
 <a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a>
 
