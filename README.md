@@ -1,6 +1,8 @@
 # DAW Sync
 
-![dclogo](https://media.discordapp.net/attachments/1541042580731592761/1555718675435225178/exec-581f7330-3dea-41f9-a936-8029a5887e05.png)
+![DAW Sync logo](assets/DAW-Sync-logo-vtuber.png)
+
+![DAW Sync supported DAWs poster](assets/DAW-Sync-poster.png)
 
 [English](README_en.md) / [日本語](README_ja.md)
 

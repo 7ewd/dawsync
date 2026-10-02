@@ -1,6 +1,8 @@
 # DAW Sync
 
-![Maltese dog](https://a-z-animals.com/media/maltese-1.jpg)
+![DAW Sync logo](assets/DAW-Sync-logo-vtuber.png)
+
+![DAW Sync supported DAWs poster](assets/DAW-Sync-poster.png)
 
 [English](README_en.md) / [日本語](README_ja.md)
 

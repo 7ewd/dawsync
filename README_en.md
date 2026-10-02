@@ -1,12 +1,17 @@
 # DAW Sync
 
-![Maltese dog](https://a-z-animals.com/media/maltese-1.jpg)
+![DAW Sync logo](assets/DAW-Sync-logo-vtuber.png)
+
+![DAW Sync supported DAWs poster](assets/DAW-Sync-poster.png)
 
 [English](README_en.md) / [日本語](README_ja.md)
 
-DAW Sync is designed to make collaboration easy for composers working across different operating systems and DAWs, regardless of their production setup.
+DAW Sync lets composers work together in real time<br>
+even across different OSs and DAWs<br>
+<b>so you can edit MIDI notes, drop in samples, and share them on the fly.</b>
 
-<a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a>
+<a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a><br>
+↑I’m broke and jobless, so please toss me some cash for the ideas
 
 ## Features
 
