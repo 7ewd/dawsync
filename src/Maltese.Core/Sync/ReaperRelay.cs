@@ -4,7 +4,7 @@ using System.Text;
 namespace Maltese.Core.Sync;
 
 /// <summary>
-/// REAPER のスクリプト（reaper/Maltese/maltese.lua）とアプリの LiveBridge をつなぐ中継。
+/// REAPER のスクリプト（reaper/maltese.lua）とアプリの LiveBridge をつなぐ中継。
 /// REAPER の Lua には通信の機能が無いので、スクリプトとはフォルダの中のファイルでやりとりし、
 /// こちらで LiveBridge（127.0.0.1:ポート）に TCP でつなぎ直す。LiveBridge からは Live と同じに見える。
 ///   &lt;AppData&gt;/Maltese/reaper-ipc/&lt;ポート&gt;/in/   こちら → REAPER（1 行 1 JSON のファイル。番号順に読まれる）

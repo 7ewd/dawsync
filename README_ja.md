@@ -53,7 +53,7 @@ bash tests/sim/run_sim.sh
 - `src/Maltese.App` — Avalonia デスクトップアプリ
 - `src/Maltese.Cli` — CLI
 - `bitwig/bridge` — Bitwig 拡張（Java）
-- `reaper/Maltese` — REAPER スクリプト（Lua）
+- `reaper` — REAPER スクリプト（Lua）
 - `tests` — シミュレーションと連携テスト
 
 ## ライセンス

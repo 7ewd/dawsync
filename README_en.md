@@ -49,7 +49,7 @@ Integration tests: `python tests/live/real_live_bitwig.py` and `python tests/rea
 - `src/Maltese.App` — Avalonia desktop app
 - `src/Maltese.Cli` — CLI
 - `bitwig/bridge` — Bitwig extension (Java)
-- `reaper/Maltese` — REAPER script (Lua)
+- `reaper` — REAPER scripts (Lua)
 - `tests` — Simulation and integration tests
 
 ## License
