@@ -5,9 +5,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "mock_live"))
-sys.path.insert(0, os.path.join(HERE, "..", "..", "src", "Maltese.Core", "RemoteScript"))
+sys.path.insert(0, os.path.join(HERE, "..", "..", "src", "DawSync.Core", "RemoteScript"))
 import Live  # noqa: E402
-from Maltese import multi  # noqa: E402
+from DawSync import multi  # noqa: E402
 
 
 class CInstance:
@@ -32,7 +32,7 @@ def make_song():
 
 
 a, b = make_song(), make_song()
-sa, sb = multi.Maltese(CInstance(a)), multi.Maltese(CInstance(b))
+sa, sb = multi.DawSync(CInstance(a)), multi.DawSync(CInstance(b))
 sa._port = int(os.environ.get("PORT_A", "47400"))
 sb._port = int(os.environ.get("PORT_B", "47420"))
 

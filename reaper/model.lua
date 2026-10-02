@@ -10,14 +10,15 @@
 -- こちらで作ったトラックは中身（MIDI のアイテムがあるか）で決める。フォルダはグループとして扱う。
 -- 変更は GetProjectStateChangeCount で気づき、全部読み直して前回と比べる（Bitwig の拡張と同じやり方）。
 
--- json は maltese.lua から渡される（loadfile(...)(json)。require は他のスクリプトの json と取り違えるので使わない）
+-- json は dawsync.lua から渡される（loadfile(...)(json)。require は他のスクリプトの json と取り違えるので使わない）
 local json = assert((...), "model.lua: json module must be passed")
 
 local M = {}
 M.__index = M
 
 local NOTE_DEFAULTS = { 60, 0, 0.25, 100, 0, 1, 0, 64 }
-local KIND_KEY = "P_EXT:maltese_kind"
+local KIND_KEY = "P_EXT:dawsync_kind"
+local LEGACY_KIND_KEYS = { "P_EXT:maltese_kind", "P_EXT:abletonmulti_kind" }
 
 -- ---------------------------------------------------------------- helpers
 
@@ -330,9 +331,12 @@ function M:track_kind(track)
   local _, stored = reaper.GetSetMediaTrackInfo_String(track, KIND_KEY, "", false)
   -- 改名前に保存したプロジェクトの種類も読み継ぐ（新しいキーを優先）。
   if stored == "" then
-    _, stored = reaper.GetSetMediaTrackInfo_String(track, "P_EXT:abletonmulti_kind", "", false)
-    if stored == "midi" or stored == "audio" or stored == "group" then
-      reaper.GetSetMediaTrackInfo_String(track, KIND_KEY, stored, true)
+    for _, legacy_key in ipairs(LEGACY_KIND_KEYS) do
+      _, stored = reaper.GetSetMediaTrackInfo_String(track, legacy_key, "", false)
+      if stored == "midi" or stored == "audio" or stored == "group" then
+        reaper.GetSetMediaTrackInfo_String(track, KIND_KEY, stored, true)
+        break
+      end
     end
   end
   if reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH") == 1 then
@@ -514,14 +518,20 @@ end
 
 local function take_ext(take, name, value)
   if value == nil then
-    local _, v = reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:maltese_" .. name, "", false)
+    local _, v = reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:dawsync_" .. name, "", false)
     -- 改名前の MIDI 位置・ワープ情報を引き継ぐ。書き込みは新しいキーだけにする。
     if v == "" then
-      _, v = reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:abletonmulti_" .. name, "", false)
+      for _, legacy_prefix in ipairs({ "maltese_", "abletonmulti_" }) do
+        _, v = reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:" .. legacy_prefix .. name, "", false)
+        if v ~= "" then
+          reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:dawsync_" .. name, v, true)
+          break
+        end
+      end
     end
     return tonumber(v)
   end
-  reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:maltese_" .. name, tostring(value), true)
+  reaper.GetSetMediaItemTakeInfo_String(take, "P_EXT:dawsync_" .. name, tostring(value), true)
 end
 
 -- オーディオのテイクの頭のずれ（D_STARTOFFS はファイルの秒なので、再生速度で割ってプロジェクトの秒にする）

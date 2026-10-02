@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DawSync.App/DawSync.App.csproj" />
+    <Project Path="src/DawSync.Cli/DawSync.Cli.csproj" />
+    <Project Path="src/DawSync.Core/DawSync.Core.csproj" />
+  </Folder>
+</Solution>

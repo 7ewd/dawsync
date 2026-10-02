@@ -1,48 +1,42 @@
-# Maltese
+# DAW Sync
 
 ![Maltese dog](https://a-z-animals.com/media/maltese-1.jpg)
 
 [English](README_en.md) / [日本語](README_ja.md)
 
-Ableton Live のプロジェクトを Mac / Windows 間で共同編集する試作ツールです。Bitwig Studio と REAPER も同じルームに参加できます。
+DAW Sync は Ableton Live のプロジェクトを macOS / Windows 間で共同編集するアプリです。Bitwig Studio と REAPER も同じルームに参加できます。
 
 <a href="https://www.buymeacoffee.com/7ewd" target="_blank" rel="noopener noreferrer"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;"></a>
 
-## できること
+## 主な機能
 
-- ロケーターの名前・位置、テンポ／拍子の変更、トラック、シーン、MIDI／オーディオクリップを同期
+- ロケーターの名前・位置、テンポ／拍子、トラック、シーン、MIDI／オーディオクリップを同期
 - Live、Bitwig、REAPER のユーザーが同じルームで編集
 - パスワード付きルームと Cloudflare Quick Tunnel による招待
 - `.als` のサンプル、プラグイン、Pack などの依存関係チェック
+- 英語 / 日本語の画面表示
 
-```text
-Live / Bitwig / REAPER ⇄ Maltese ⇄ 共有ルーム
-```
+ミキサー設定（音量、パン、センド、エフェクト）は参加者ごとに保持します。Live の Remote Script API の制限により、アレンジメントのテンポ／拍子オートメーションは拍 0 の値を反映し、他のマップ点は保持します。
 
-ミキサー設定（音量、パン、センド、FX）は同期しません。試作版のため、重要なプロジェクトはバックアップして使用してください。
+## ダウンロード
 
-Live の Remote Script API はロケーターを編集できますが、アレンジメントのテンポ／拍子オートメーションは編集できません。Live では拍 0 の値を反映し、その他のマップ点は他のホストへ返せるよう保持します。
+[Windows 用単体実行ファイル（DawSync.exe）をダウンロード](https://github.com/7ewd/maltese/releases/download/v1.0/DawSync.exe) · [DAW Sync 1.0 リリース](https://github.com/7ewd/maltese/releases/tag/v1.0)
+
+Windows 版は自己完結型です。.NET のインストールや追加ランタイムは必要ありません。Live、Bitwig、REAPER 用の連携ファイルも含まれており、アプリからインストールできます。
 
 ## 使い方
 
-1. アプリを起動し、ルームを作成または参加します。
-2. アプリから Live Remote Script、Bitwig 拡張、または REAPER スクリプトをインストールします。
+1. DAW Sync を起動して、ルームを作成または参加します。
+2. アプリから使用する DAW の連携ファイルをインストールします。
 3. 招待コードを共有して共同編集を始めます。
+
+Maltese から更新する場合は、改名後の DAW Sync 用連携ファイルを選ぶため、DAW 連携をもう一度インストールしてください。
 
 ## 動作確認済み
 
 - Ableton Live Suite 12（12.4.6）
 - REAPER v7.81
 - Bitwig Studio 6.1
-
-## 構成
-
-- `src/Maltese.Core` — `.als` 解析、同期処理、依存関係チェック
-- `src/Maltese.App` — Avalonia デスクトップアプリ
-- `src/Maltese.Cli` — CLI
-- `bitwig/bridge` — Bitwig 拡張（Java）
-- `reaper` — REAPER スクリプト（Lua）
-- `tests` — シミュレーションと連携テスト
 
 ## ライセンス
 

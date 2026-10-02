@@ -1,7 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/Maltese.App/Maltese.App.csproj" />
-    <Project Path="src/Maltese.Cli/Maltese.Cli.csproj" />
-    <Project Path="src/Maltese.Core/Maltese.Core.csproj" />
-  </Folder>
-</Solution>

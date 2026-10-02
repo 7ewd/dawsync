@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Live に入れる Remote Script をアプリに同梱する -->
+  <ItemGroup>
+    <EmbeddedResource Include="RemoteScript\DawSync\*.py" LogicalName="RemoteScript/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- REAPER に入れるスクリプト（Lua） -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\reaper\*.lua" LogicalName="ReaperScript/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- Bitwig に入れる拡張（bitwig/build.sh で作る。Bitwig の内部 API を使うので、Bitwig のある PC でビルドしてここに置く） -->
+  <ItemGroup>
+    <EmbeddedResource Include="BitwigExtension\DawSync.bwextension" LogicalName="BitwigExtension/DawSync.bwextension"
+                      Condition="Exists('BitwigExtension\DawSync.bwextension')" />
+  </ItemGroup>
+
+</Project>

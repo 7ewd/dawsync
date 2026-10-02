@@ -1,5 +1,5 @@
 """
-モックの Live 1 台と、本物の REAPER（Maltese のスクリプトを入れて起動しておく）で同時編集を確かめる。
+モックの Live 1 台と、本物の REAPER（DawSync のスクリプトを入れて起動しておく）で同時編集を確かめる。
 
   python tests/reaper/live_reaper.py            自動のテスト（REAPER の状態はスクリプトのデバッグ出力で見る）
   python tests/reaper/live_reaper.py --watch 300 テストの後、300 秒間つないだままにして Live 側の状態を
@@ -18,18 +18,18 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "tests", "sim", "mock_live"))
-sys.path.insert(0, os.path.join(ROOT, "src", "Maltese.Core", "RemoteScript"))
+sys.path.insert(0, os.path.join(ROOT, "src", "DawSync.Core", "RemoteScript"))
 
 import Live  # noqa: E402  (モック)
-from Maltese import multi  # noqa: E402
+from DawSync import multi  # noqa: E402
 
 LOGS = os.path.join(HERE, "logs")
-IPC = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Maltese", "reaper-ipc")
+IPC = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "DawSync", "reaper-ipc")
 TEST_PORT = 47491
 BW_DIR = os.path.join(IPC, str(TEST_PORT))
 STATE = os.path.join(BW_DIR, "state.json")
 PORT_FILE = os.path.join(IPC, "port")
-CLI = os.path.join(ROOT, "src", "Maltese.Cli", "bin", "Debug", "net10.0", "Maltese.Cli" + (".exe" if os.name == "nt" else ""))
+CLI = os.path.join(ROOT, "src", "DawSync.Cli", "bin", "Debug", "net10.0", "DawSync.Cli" + (".exe" if os.name == "nt" else ""))
 results = []
 
 
@@ -63,7 +63,7 @@ app = Live._App()
 app.browser = Live.Browser([])
 app.browser.song = song
 Live.Application.current = app
-script = multi.Maltese(CInstance(song))
+script = multi.DawSync(CInstance(song))
 script._port = 47410
 
 
@@ -164,7 +164,7 @@ def main():
     if os.path.exists(STATE):
         os.remove(STATE)
 
-    build = subprocess.run(["dotnet", "build", os.path.join(ROOT, "src", "Maltese.Cli"), "-v", "q", "-nologo"],
+    build = subprocess.run(["dotnet", "build", os.path.join(ROOT, "src", "DawSync.Cli"), "-v", "q", "-nologo"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
     if build.returncode != 0:
         print(build.stdout[-3000:])
@@ -177,7 +177,7 @@ def main():
         path = os.path.join(LOGS, "trace_%s.jsonl" % name)
         if os.path.exists(path):
             os.remove(path)
-        return dict(os.environ, MALTESE_TRACE=path)
+        return dict(os.environ, DAWSYNC_TRACE=path)
 
     host = subprocess.Popen([CLI, "session", "--host", "--name", "Live", "--bridge-port", "47410", "--port", "47411",
                              "--key", "BWTEST", "--samples", os.path.join(LOGS, "samples_live")],

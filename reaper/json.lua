@@ -1,4 +1,4 @@
--- 最小限の JSON（Maltese の REAPER 用スクリプトで使う）
+-- 最小限の JSON（DawSync の REAPER 用スクリプトで使う）
 -- 値は table（配列は json.array で作ったもの、または 1 から続く数字のキーだけのもの）/ string / number / boolean / json.null
 local json = {}
 

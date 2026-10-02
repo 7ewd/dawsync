@@ -5,7 +5,7 @@ B はホスト A に中継（このスクリプト内の TCP プロキシ）を�
 切れている間に A・B それぞれで編集してから、プロキシを戻す。
 - B が自動でつなぎ直すこと
 - 切れている間の B の変更が A に届くこと、A の変更が B に届くこと
-使い方: python tests/sim/reconnect.py（事前に dotnet build src/Maltese.Cli）
+使い方: python tests/sim/reconnect.py（事前に dotnet build src/DawSync.Cli）
 """
 import os
 import socket
@@ -17,14 +17,14 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..", "..")
 sys.path.insert(0, os.path.join(HERE, "mock_live"))
-sys.path.insert(0, os.path.join(ROOT, "src", "Maltese.Core", "RemoteScript"))
+sys.path.insert(0, os.path.join(ROOT, "src", "DawSync.Core", "RemoteScript"))
 
 import Live  # noqa: E402  (モック)
-from Maltese import multi  # noqa: E402
+from DawSync import multi  # noqa: E402
 
 LOGS = os.path.join(HERE, "logs", "reconnect")
 os.makedirs(LOGS, exist_ok=True)
-CLI = os.path.join(ROOT, "src", "Maltese.Cli", "bin", "Debug", "net10.0", "Maltese.Cli")
+CLI = os.path.join(ROOT, "src", "DawSync.Cli", "bin", "Debug", "net10.0", "DawSync.Cli")
 SERVER_PORT, PROXY_PORT = 47471, 47472
 results = []
 
@@ -105,7 +105,7 @@ class Side:
 
     def start(self):
         Live.Application.current = self.app
-        self.script = multi.Maltese(CInstance(self.name, self.song))
+        self.script = multi.DawSync(CInstance(self.name, self.song))
         self.script._port = self.port
 
     def tick(self):

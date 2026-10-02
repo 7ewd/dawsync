@@ -7,8 +7,8 @@ LOG="$ROOT/tests/sim/logs"
 rm -rf "$LOG"
 mkdir -p "$LOG"
 
-dotnet build "$ROOT/src/Maltese.Cli" -v q -nologo > "$LOG/build.txt" 2>&1 || { cat "$LOG/build.txt"; exit 1; }
-CLI="$ROOT/src/Maltese.Cli/bin/Debug/net10.0/Maltese.Cli"
+dotnet build "$ROOT/src/DawSync.Cli" -v q -nologo > "$LOG/build.txt" 2>&1 || { cat "$LOG/build.txt"; exit 1; }
+CLI="$ROOT/src/DawSync.Cli/bin/Debug/net10.0/DawSync.Cli"
 
 "$CLI" session --host --name A --bridge-port 47410 --port 47411 --key TEST42 --samples "$LOG/samples_a" > "$LOG/app_a.txt" 2>&1 &
 PID_A=$!

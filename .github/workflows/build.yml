@@ -18,8 +18,11 @@ jobs:
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
-          name: Maltese-windows
-          path: dist/Maltese-windows.zip
+          name: DAW-Sync-windows
+          path: |
+            dist/DAW-Sync-windows.zip
+            dist/win-x64/DawSync.exe
+          if-no-files-found: error
 
   macos:
     runs-on: macos-latest
@@ -34,5 +37,6 @@ jobs:
       - run: chmod +x build/publish-macos.sh && ./build/publish-macos.sh ${{ matrix.rid }}
       - uses: actions/upload-artifact@v4
         with:
-          name: Maltese-${{ matrix.rid }}
-          path: dist/Maltese-${{ matrix.rid }}.zip
+          name: DAW-Sync-${{ matrix.rid }}
+          path: dist/DAW-Sync-${{ matrix.rid }}.zip
+          if-no-files-found: error

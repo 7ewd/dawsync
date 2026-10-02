@@ -1,0 +1,234 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="using:DawSync.App"
+             x:Class="DawSync.App.SessionView">
+
+    <UserControl.Styles>
+        <Style Selector="TextBlock.step">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="Bold" />
+        </Style>
+        <Style Selector="TextBlock.warning">
+            <Setter Property="Foreground" Value="#E5484D" />
+        </Style>
+        <Style Selector="Button.link">
+            <Setter Property="Background" Value="#000000" />
+            <Setter Property="Padding" Value="0,2" />
+            <Setter Property="Foreground" Value="#FFFFFF" />
+            <Setter Property="BorderBrush" Value="#FFFFFF" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="0" />
+            <Setter Property="FontSize" Value="13" />
+        </Style>
+        <Style Selector="Ellipse.dot">
+            <Setter Property="Width" Value="10" />
+            <Setter Property="Height" Value="10" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+    </UserControl.Styles>
+
+    <Grid ColumnDefinitions="390,*" Margin="24,20,24,20">
+
+        <!-- 左: 準備 -->
+        <ScrollViewer Grid.Column="0" Margin="0,0,20,0">
+            <StackPanel Spacing="14">
+
+                <!-- ① DAW（Live / Bitwig） -->
+                <Border Classes="card" Padding="18">
+                    <StackPanel Spacing="10">
+                        <TextBlock x:Name="DawStep" Classes="step" Text="① Ableton Live / Bitwig / REAPER とつなぐ" />
+                        <StackPanel Orientation="Horizontal" Spacing="9">
+                            <Ellipse x:Name="LiveDot" Classes="dot" />
+                            <TextBlock x:Name="LiveStatus" FontSize="14" VerticalAlignment="Center" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button x:Name="InstallButton" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" Padding="0,8" />
+                        <Button x:Name="BitwigInstallButton" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" Padding="0,8" />
+                        <Button x:Name="ReaperInstallButton" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" Padding="0,8" />
+                        <Button x:Name="HowToToggle" Classes="link" Content="つなぎ方を見る ▾" />
+                        <Border x:Name="HowToPanel" Background="{DynamicResource InsetBackground}" CornerRadius="0"
+                                BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" Padding="14,12" IsVisible="False">
+                            <StackPanel Spacing="6">
+                                <TextBlock x:Name="HowLiveTitle" FontSize="13" FontWeight="SemiBold" Text="Ableton Live" />
+                                <TextBlock x:Name="HowLive1" TextWrapping="Wrap" FontSize="13" Text="1. 上のボタンで Live にスクリプトを入れる" />
+                                <TextBlock x:Name="HowLive2" TextWrapping="Wrap" FontSize="13" Text="2. Live を起動（起動中なら再起動）" />
+                                <TextBlock x:Name="HowLive3" TextWrapping="Wrap" FontSize="13" Text="3. Live の「環境設定」→「Tempo &amp; MIDI」→「コントロールサーフェス」で「DawSync（DAW Sync）」を選ぶ" />
+                                <TextBlock x:Name="HowBitwigTitle" FontSize="13" FontWeight="SemiBold" Margin="0,6,0,0" Text="Bitwig Studio" />
+                                <TextBlock x:Name="HowBitwig1" TextWrapping="Wrap" FontSize="13" Text="1. 上のボタンで Bitwig に拡張を入れる" />
+                                <TextBlock x:Name="HowBitwig2" TextWrapping="Wrap" FontSize="13" Text="2. Bitwig の「設定」→「コントローラー」→「Add Controller」で「DAW Sync」を追加" />
+                                <TextBlock x:Name="HowReaperTitle" FontSize="13" FontWeight="SemiBold" Margin="0,6,0,0" Text="REAPER" />
+                                <TextBlock x:Name="HowReaper1" TextWrapping="Wrap" FontSize="13" Text="1. 上のボタンで REAPER にスクリプトを入れる" />
+                                <TextBlock x:Name="HowReaper2" TextWrapping="Wrap" FontSize="13" Text="2. REAPER を起動（起動中なら再起動）。あとは自動でつながります" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- ② ルーム -->
+                <Border Classes="card" Padding="18">
+                    <StackPanel Spacing="10">
+                        <TextBlock x:Name="RoomStep" Classes="step" Text="② ルームに入る" />
+
+                        <StackPanel x:Name="JoinPanel" Spacing="10">
+                            <TextBlock x:Name="NameLabel" Classes="subtle" FontSize="13" Text="あなたの名前" />
+                            <TextBox x:Name="NameBox" PlaceholderText="例: たろう" MaxLength="20" />
+                            <Button x:Name="HostButton" HorizontalAlignment="Stretch"
+                                    HorizontalContentAlignment="Center" Padding="0,9" Content="ルームを作る" />
+
+                            <Grid ColumnDefinitions="*,Auto,*" Margin="0,4">
+                                <Border Height="1" Background="{DynamicResource CardBorder}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="OrText" Grid.Column="1" Text="または" Classes="subtle" FontSize="12" Margin="10,0" />
+                                <Border Grid.Column="2" Height="1" Background="{DynamicResource CardBorder}" VerticalAlignment="Center" />
+                            </Grid>
+
+                            <TextBox x:Name="AddressBox" PlaceholderText="招待コード（またはアドレス）" />
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBox x:Name="KeyBox" PlaceholderText="合言葉" MaxLength="12" />
+                                <Button Grid.Column="1" x:Name="JoinButton" Content="参加する" Margin="8,0,0,0" Padding="16,6" />
+                            </Grid>
+                        </StackPanel>
+
+                        <StackPanel x:Name="InRoomPanel" Spacing="10" IsVisible="False">
+                            <TextBlock x:Name="RoomTitle" FontSize="14" FontWeight="SemiBold" />
+                            <StackPanel x:Name="HostInfo" Spacing="8">
+                                <Button x:Name="PublishButton" HorizontalAlignment="Stretch"
+                                        HorizontalContentAlignment="Center" Padding="0,9" Content="インターネットに公開" />
+                                <TextBlock x:Name="PublishStatus" Classes="subtle" FontSize="12.5" TextWrapping="Wrap" IsVisible="False" />
+                                <Border x:Name="PublishedPanel" IsVisible="False" CornerRadius="0" Padding="12,10"
+                                        Background="{DynamicResource InsetBackground}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1">
+                                    <StackPanel Spacing="6">
+                                        <TextBlock x:Name="PublishedInviteText" Text="招待コード（これを送るだけで参加できます）" FontSize="12.5" TextWrapping="Wrap" />
+                                        <SelectableTextBlock x:Name="PublicCodeText" FontFamily="{StaticResource MonoFont}"
+                                                             FontSize="13" FontWeight="Bold" TextWrapping="Wrap" />
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Button x:Name="CopyPublicButton" Content="コピー" Padding="14,4" />
+                                            <Button x:Name="UnpublishButton" Content="公開をやめる" Padding="10,4" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                                <Border Background="{DynamicResource InsetBackground}" CornerRadius="0"
+                                        BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" Padding="12,8">
+                                    <Grid ColumnDefinitions="Auto,*,Auto">
+                                        <TextBlock x:Name="KeyLabel" Text="合言葉" Classes="subtle" FontSize="13" VerticalAlignment="Center" Margin="0,0,12,0" />
+                                        <SelectableTextBlock Grid.Column="1" x:Name="KeyText" FontSize="22" FontWeight="Bold"
+                                                             FontFamily="{StaticResource MonoFont}" VerticalAlignment="Center" />
+                                        <Button Grid.Column="2" x:Name="CopyInviteButton" Content="招待をコピー" Padding="10,4" />
+                                    </Grid>
+                                </Border>
+                                <ItemsControl x:Name="AddressList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="local:AddressVm">
+                                            <Border Background="{DynamicResource InsetBackground}" CornerRadius="0"
+                                                    BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" Padding="12,8" Margin="0,0,0,6">
+                                                <Grid ColumnDefinitions="*,Auto">
+                                                    <StackPanel>
+                                                        <SelectableTextBlock Text="{Binding Address}" FontSize="16" FontWeight="Bold" />
+                                                        <TextBlock Text="{Binding Label}" Classes="subtle" FontSize="12" />
+                                                    </StackPanel>
+                                                    <Button Grid.Column="1" Content="{Binding CopyText}" Padding="10,4" Tag="{Binding Address}"
+                                                            Click="OnCopyAddress" VerticalAlignment="Center" />
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                            <Button x:Name="LeaveButton" Content="ルームから出る" HorizontalAlignment="Left" />
+                        </StackPanel>
+
+                        <TextBlock x:Name="RoomError" Foreground="#E5484D" FontSize="13" TextWrapping="Wrap" IsVisible="False" />
+                    </StackPanel>
+                </Border>
+
+                <!-- 参加者 -->
+                <Border Classes="card" Padding="18" x:Name="PeersCard" IsVisible="False">
+                    <StackPanel Spacing="10">
+                        <TextBlock Classes="step" x:Name="PeersTitle" Text="参加者" />
+                        <ItemsControl x:Name="PeerList">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><StackPanel Spacing="8" /></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="local:PeerVm">
+                                    <StackPanel Orientation="Horizontal" Spacing="10">
+                                        <Border Width="30" Height="30" CornerRadius="0" Background="{Binding Color}">
+                                            <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="Bold"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        </Border>
+                                        <TextBlock Text="{Binding Name}" FontSize="14" VerticalAlignment="Center" />
+                                        <TextBlock Text="{Binding Tag}" Classes="subtle" FontSize="12.5" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!-- 受け取ったサンプルの保存先 -->
+                <Border Classes="card" Padding="18">
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Name="SamplesStep" Classes="step" Text="サンプルの保存先" />
+                        <SelectableTextBlock x:Name="SamplesPath" Classes="mono subtle" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="OpenSamplesButton" Content="開く" Padding="14,4" />
+                            <Button x:Name="ChangeSamplesButton" Content="変更…" Padding="14,4" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- 右: 状態と履歴 -->
+        <Grid Grid.Column="1" RowDefinitions="Auto,*">
+            <Border x:Name="Banner" CornerRadius="0" Padding="18,14" BorderThickness="1"
+                    BorderBrush="{DynamicResource CardBorder}" Background="{DynamicResource CardBackground}">
+                <Grid ColumnDefinitions="Auto,*,Auto">
+                    <Ellipse x:Name="BannerDot" Width="14" Height="14" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Margin="14,0" Spacing="2" VerticalAlignment="Center">
+                        <TextBlock x:Name="BannerTitle" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <TextBlock x:Name="BannerDetail" Classes="subtle" FontSize="13" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Spacing="6" VerticalAlignment="Center">
+                        <Button x:Name="ResyncButton" Content="もう一度合わせる" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" IsVisible="False" />
+                        <Button x:Name="OverwriteButton" Content="このセットをルームの内容で上書き" IsVisible="False" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="1" Classes="card" Padding="0" Margin="0,14,0,0">
+                <Grid RowDefinitions="Auto,*">
+                    <Grid ColumnDefinitions="*,Auto" Margin="18,14,18,8">
+                        <TextBlock x:Name="ActivityTitle" Classes="step" Text="みんなの変更" />
+                        <Button Grid.Column="1" x:Name="ClearButton" Content="消去" Padding="10,3" FontSize="12" />
+                    </Grid>
+                    <ScrollViewer Grid.Row="1">
+                        <ItemsControl x:Name="ActivityList" Margin="10,0,16,10">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="local:ActivityVm">
+                                    <Grid ColumnDefinitions="Auto,Auto,*,Auto" Margin="8,5">
+                                        <Ellipse Width="9" Height="9" Fill="{Binding Color}" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                        <TextBlock Grid.Column="1" Text="{Binding Who}" FontWeight="SemiBold" FontSize="13.5"
+                                                   Foreground="{Binding Color}" Margin="0,0,10,0" VerticalAlignment="Center" />
+                                        <StackPanel Grid.Column="2" Spacing="6" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Text}" FontSize="13.5" TextWrapping="Wrap"
+                                                       Classes.warning="{Binding IsWarning}" />
+                                            <Border IsVisible="{Binding HasImage}" BorderBrush="{DynamicResource CardBorder}"
+                                                    BorderThickness="1" Padding="2" HorizontalAlignment="Left">
+                                                <Image Source="{Binding Image}" Width="240" MaxHeight="180" Stretch="Uniform" />
+                                            </Border>
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="3" Text="{Binding TimeText}" Classes="subtle" FontSize="12"
+                                                   VerticalAlignment="Center" Margin="12,0,0,0" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>
