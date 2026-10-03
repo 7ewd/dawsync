@@ -437,6 +437,9 @@ class Song(Listenable):
         self.signature_numerator = 4
         self.signature_denominator = 4
         self.current_song_time = 0.0
+        # Real Live exposes this transport state and the Remote Script uses it
+        # to apply received tempo/signature map rows only during playback.
+        self.is_playing = False
         self.cue_points = []
         self.tracks = []
         self.return_tracks = []

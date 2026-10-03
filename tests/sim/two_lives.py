@@ -255,13 +255,60 @@ A.song.set_or_delete_cue()
 check("ロケーターの削除", lambda: len(B.song.cue_points) == 0)
 
 # Live の API では非ゼロ位置のテンポ・拍子オートメーションを編集できないため、
-# 基準値だけ反映し、受け取ったマップの残りは状態として保持する。
+# 基準値を反映し、受け取ったマップの残りは保持する。再生中はランタイム追従も行う。
 B.script._model.apply([{"k": "tempo_map", "v": [[0.0, 100.0], [16.0, 140.0]]}], True, {})
 check("テンポマップの基準値", lambda: B.song.tempo == 100.0
       and B.script._model.read("tempo_map") == [[0.0, 100.0], [16.0, 140.0]])
 B.script._model.apply([{"k": "sig_map", "v": [[0.0, 3, 4], [16.0, 7, 8]]}], True, {})
 check("拍子マップの基準値", lambda: (B.song.signature_numerator, B.song.signature_denominator) == (3, 4)
       and B.script._model.read("sig_map") == [[0.0, 3, 4], [16.0, 7, 8]])
+# Keep the normal simulation state intact while probing playback-only behavior.
+# In particular, do not mark every key as sent: doing so would hide the next
+# real edit from the collaboration loop.
+_runtime_probe_state = {
+    "tempo": B.song.tempo,
+    "sig": (B.song.signature_numerator, B.song.signature_denominator),
+    "time": B.song.current_song_time,
+    "playing": B.song.is_playing,
+    "tempo_map": None if B.script._model._runtime_tempo_map is None else [list(r) for r in B.script._model._runtime_tempo_map],
+    "sig_map": None if B.script._model._runtime_sig_map is None else [list(r) for r in B.script._model._runtime_sig_map],
+    "tempo_index": B.script._model._runtime_tempo_index,
+    "sig_index": B.script._model._runtime_sig_index,
+    "last_beat": B.script._model._runtime_last_beat,
+    "dirty": set(B.script._model.dirty),
+    "runtime_dirty": B.script._model._runtime_dirty,
+}
+# The live network may have sent the host's baseline map while the assertions
+# above were waiting. Install the map rows directly for this isolated playback
+# probe; the complete original model state is restored below.
+B.script._model._runtime_tempo_map = [[0.0, 100.0], [16.0, 140.0]]
+B.script._model._runtime_sig_map = [[0.0, 3, 4], [16.0, 7, 8]]
+B.script._model._runtime_tempo_index = 0
+B.script._model._runtime_sig_index = 0
+B.script._model._runtime_last_beat = None
+B.song.is_playing = True
+B.song.current_song_time = 16.0
+B.script._model.collect_changes()
+check("再生中のテンポマップ追従", lambda: B.song.tempo == 140.0)
+B.song.is_playing = False
+B.song.current_song_time = 32.0
+B.script._model.collect_changes()
+check("停止中はテンポマップを上書きしない", lambda: B.song.tempo == 140.0)
+B.song.is_playing = True
+B.song.current_song_time = 16.0
+B.script._model.collect_changes()
+check("再生中の拍子マップ追従", lambda: (B.song.signature_numerator, B.song.signature_denominator) == (7, 8))
+B.song.tempo = _runtime_probe_state["tempo"]
+B.song.signature_numerator, B.song.signature_denominator = _runtime_probe_state["sig"]
+B.song.current_song_time = _runtime_probe_state["time"]
+B.song.is_playing = _runtime_probe_state["playing"]
+B.script._model._runtime_tempo_index = _runtime_probe_state["tempo_index"]
+B.script._model._runtime_sig_index = _runtime_probe_state["sig_index"]
+B.script._model._runtime_last_beat = _runtime_probe_state["last_beat"]
+B.script._model._runtime_tempo_map = _runtime_probe_state["tempo_map"]
+B.script._model._runtime_sig_map = _runtime_probe_state["sig_map"]
+B.script._model.dirty = _runtime_probe_state["dirty"]
+B.script._model._runtime_dirty = _runtime_probe_state["runtime_dirty"]
 
 B.song.tracks[2].name = "Drums Bus"
 check("トラック名", lambda: A.song.tracks[2].name == "Drums Bus")
