@@ -1,10 +1,11 @@
 # Live のセットを「キー → 値」の集まりとして読み書きする。
 #
 # キーの一覧（<id> はトラック・シーン・デバイスごとの ID。番号ではないので、追加・削除でずれない）
-#   tempo, sig                     テンポ、拍子（既存クライアント互換）
-#   locators                       アレンジメントのロケーター [[拍, 名称], ...]
-#   tempo_map                      テンポ変更 [[拍, BPM], ...]（Live は再生中に追従、保存済み .als は読み取り）
-#   sig_map                        拍子変更 [[拍, 分子, 分母], ...]（Live は拍 0 の基準値のみ）
+#   tempo, sig                     拍 0 のテンポ、拍子（古いバージョンとの互換。同じまとまりに tempo_map / sig_map があればそちらを使う）
+#   locators                       アレンジメントのロケーター [[拍, 名前], ...]
+#   tempo_map                      テンポの変化 [[拍, BPM] か [拍, BPM, 1（次の点まで直線）], ...]（normalize_tempo_map を参照）
+#   sig_map                        拍子の変化 [[拍, 分子, 分母], ...]
+#                                  Live はどちらも書き込めないので再生中に追従させ、Live で書いたものは保存した .als から読む
 #   t/<id>                         トラックがあること {"k": midi|audio|group, "o": 並び順, "g": 入っているグループの id}（null = 削除）
 #                                  グループは Live の API で作れないので、相手が作ったら手動で作ってもらい、自動でつなぐ
 #   t/<id>/name|color              （ミキサー: 音量・パン・センド・ミュート・ソロは各自のものなので同期しない）
@@ -98,6 +99,303 @@ def _lis_indices(keys):
     return set(result)
 
 
+# ---------------------------------------------------------------- テンポ・拍子・ロケーター
+#
+# tempo_map の行は [拍, BPM] か [拍, BPM, 1]。3 つ目が 1 の点からは次の点の BPM まで（拍に対して）直線で変わる
+# （ランプ）。無い・0 なら次の点まで同じ BPM（段差）。同じ拍に 2 点あるときは、前の点がランプの行き先、後の点が
+# その拍からの値（ランプの終わりで跳ぶ）。Live の .als・Bitwig（DAWproject）・REAPER の linear なテンポマーカーと
+# 同じ考え方で、古い相手は 3 つ目を読まないので段差として扱う。
+# REAPER の model.lua と Bitwig の TimingMaps.java にも同じ規則の実装がある（tests/timing で同じ例を確かめる）。
+
+TEMPO_EPS = 0.002  # これより小さい BPM の差は同じとみなす（丸めや、ランプの途中に入れた点の誤差）
+
+
+def _flag(value):
+    if isinstance(value, bool):
+        return value
+    try:
+        return float(value) != 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def normalize_tempo_map(rows):
+    """テンポの点を決まった形にする（並べる・意味の無い点を除く・拍 0 から始める）。読めなければ []。"""
+    points = []
+    for row in rows or ():
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:
+            beat, bpm = float(row[0]), float(row[1])
+        except (TypeError, ValueError):
+            continue
+        if beat != beat or bpm != bpm or bpm <= 0 or abs(beat) == float("inf") or bpm == float("inf"):
+            continue
+        points.append([_round(max(0.0, beat)), _round(bpm, 3), len(row) > 2 and _flag(row[2])])
+    if not points:
+        return []
+    points.sort(key=lambda p: p[0])
+    if points[0][0] > 0:
+        points.insert(0, [0.0, points[0][1], False])
+    out = []
+    for n, (beat, bpm, linear) in enumerate(points):
+        nxt = points[n + 1] if n + 1 < len(points) else None
+        ramp = bool(linear and nxt is not None and nxt[0] > beat and nxt[1] != bpm)
+        current = [beat, bpm, ramp]
+        if out and out[-1][0] == beat:
+            # 同じ拍の点。直前の点がランプの行き先なら残して跳ぶ。そうでなければ、跳ぶ前の値は意味が無いので置き換える
+            ramp_end = len(out) >= 2 and out[-2][2] and out[-2][0] < beat
+            if ramp_end and out[-1][1] != bpm:
+                out.append(current)
+            else:
+                out[-1] = current
+            continue
+        if out and not out[-1][2] and out[-1][1] == bpm and not ramp:
+            continue  # 前と同じ BPM が続くだけ
+        out.append(current)
+    # ランプの途中に入った点（REAPER の拍子だけのマーカーなど）で、前後を結ぶ線の上にあるものは除く
+    n = 1
+    while n < len(out) - 1:
+        a, q, c = out[n - 1], out[n], out[n + 1]
+        if a[2] and q[2] and a[0] < q[0] < c[0] \
+                and abs(a[1] + (c[1] - a[1]) * (q[0] - a[0]) / (c[0] - a[0]) - q[1]) <= TEMPO_EPS:
+            del out[n]
+            continue
+        n += 1
+    out[-1][2] = False
+    return [[b, v, 1] if r else [b, v] for b, v, r in out]
+
+
+def tempo_at(rows, beat):
+    """決まった形のテンポマップの、拍 beat での BPM（ちょうど点の上なら、その点からの値）。"""
+    if not rows:
+        return None
+    index = -1
+    for n, row in enumerate(rows):
+        if float(row[0]) <= beat + 1e-9:
+            index = n
+        else:
+            break
+    if index < 0:
+        return float(rows[0][1])
+    row = rows[index]
+    if len(row) > 2 and _flag(row[2]) and index + 1 < len(rows):
+        b0, v0 = float(row[0]), float(row[1])
+        b1, v1 = float(rows[index + 1][0]), float(rows[index + 1][1])
+        if b1 > b0:
+            return v0 + (v1 - v0) * (beat - b0) / (b1 - b0)
+    return float(row[1])
+
+
+def _in_ramp(rows, beat):
+    """決まった形のテンポマップで、拍 beat がランプの途中か（ちょうど終わりの点の上は含まない）。"""
+    for n, row in enumerate(rows or ()):
+        if n + 1 < len(rows) and float(row[0]) <= beat < float(rows[n + 1][0]):
+            return len(row) > 2 and _flag(row[2])
+    return False
+
+
+RAMP_STEP = 0.25  # ランプに追従させるときの BPM の刻み
+
+
+def tempo_map_varies(rows):
+    """テンポが途中で変わるか（オートメーションがあるか）。"""
+    return len(normalize_tempo_map(rows)) > 1
+
+
+def tempo_maps_close(a, b, tol=0.01):
+    """2 つのテンポマップが、どこでもほぼ同じ BPM になるか（書き方の違いは気にしない）。"""
+    a, b = normalize_tempo_map(a), normalize_tempo_map(b)
+    if not a or not b:
+        return not a and not b
+    beats = sorted(set(float(r[0]) for r in a) | set(float(r[0]) for r in b))
+    samples = [beats[-1] + 1.0]
+    for n, beat in enumerate(beats):
+        samples.append(beat)
+        if beat > 0:
+            samples.append(beat - 0.001)
+        if n + 1 < len(beats):
+            samples.append((beat + beats[n + 1]) / 2.0)
+    return all(abs(tempo_at(a, s) - tempo_at(b, s)) <= tol for s in samples)
+
+
+def tempo_events_to_map(events):
+    """[(拍, BPM), ...]（Live のエンベロープのように、点と点の間は直線）をテンポマップにする。"""
+    return normalize_tempo_map([[t, v, 1] for t, v in events])
+
+
+def set_tempo_at(rows, beat, bpm):
+    """拍 beat を含む区間（その前の最後の点）の BPM を変える。"""
+    rows = [list(r) for r in normalize_tempo_map(rows)] or [[0.0, bpm]]
+    index = 0
+    for n, row in enumerate(rows):
+        if float(row[0]) <= beat + 1e-9:
+            index = n
+    rows[index][1] = _round(bpm, 3)
+    return normalize_tempo_map(rows)
+
+
+def normalize_sig_map(rows):
+    """拍子の変わり目 [[拍, 分子, 分母], ...] を決まった形にする。読めなければ []。"""
+    points = []
+    for row in rows or ():
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        try:
+            beat, num, den = float(row[0]), int(round(float(row[1]))), int(round(float(row[2])))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if beat != beat or abs(beat) == float("inf") or num < 1 or den < 1:
+            continue
+        points.append([_round(max(0.0, beat)), num, den])
+    if not points:
+        return []
+    points.sort(key=lambda p: p[0])
+    if points[0][0] > 0:
+        points.insert(0, [0.0, points[0][1], points[0][2]])
+    same_beat = []
+    for p in points:
+        if same_beat and same_beat[-1][0] == p[0]:
+            same_beat[-1] = p
+        else:
+            same_beat.append(p)
+    out = []
+    for p in same_beat:
+        if not out or out[-1][1:] != p[1:]:
+            out.append(p)
+    return out
+
+
+def sig_at(rows, beat):
+    current = None
+    for row in rows or ():
+        if float(row[0]) <= beat + 1e-9 or current is None:
+            current = [int(row[1]), int(row[2])]
+        else:
+            break
+    return current
+
+
+def sig_map_varies(rows):
+    return len(normalize_sig_map(rows)) > 1
+
+
+def set_sig_at(rows, beat, num, den):
+    rows = [list(r) for r in normalize_sig_map(rows)] or [[0.0, num, den]]
+    index = 0
+    for n, row in enumerate(rows):
+        if float(row[0]) <= beat + 1e-9:
+            index = n
+    rows[index][1], rows[index][2] = int(num), int(den)
+    return normalize_sig_map(rows)
+
+
+def normalize_locators(rows):
+    """ロケーター [[拍, 名前], ...] を拍・名前の順に並べる。"""
+    result = []
+    for row in rows or ():
+        if not isinstance(row, (list, tuple)) or len(row) < 1:
+            continue
+        try:
+            beat = float(row[0])
+        except (TypeError, ValueError):
+            continue
+        if beat != beat or abs(beat) == float("inf"):
+            continue
+        name = row[1] if len(row) > 1 and row[1] is not None else ""
+        result.append([_round(max(0.0, beat)), str(name)])
+    return sorted(result, key=lambda r: (r[0], r[1]))
+
+
+def _decode_als_sig(value):
+    """.als の拍子の値（(分子 - 1) + 99 × log2(分母)。4/4 なら 201）。"""
+    value = int(value)
+    return value % 99 + 1, 2 ** (value // 99)
+
+
+def _read_als_timing(path):
+    """
+    保存された .als（gzip の XML）から、アレンジメントのテンポと拍子の変化を読む。読めなければ None。
+    メイントラックの Tempo / TimeSignature のオートメーション（AutomationTarget の Id で探す）を使う。
+    Live は、オートメーションが無くても「最初の値」の点（Time="-63072000"）を 1 つ持っていて、点と点の間は直線。
+    """
+    try:
+        with gzip.open(path, "rb") as stream:
+            root = ET.parse(stream).getroot()
+    except (OSError, EOFError, ET.ParseError, ValueError):
+        return None
+    track = None
+    for name in ("MainTrack", "MasterTrack"):
+        track = root.find("./LiveSet/%s" % name)
+        if track is None:
+            track = root.find(".//%s" % name)
+        if track is not None:
+            break
+    if track is None:
+        return None
+    envelopes = track.find("./AutomationEnvelopes/Envelopes")
+
+    def param(tag):
+        node = track.find("./DeviceChain/Mixer/%s" % tag)
+        return node if node is not None else track.find(".//%s" % tag)
+
+    def events(node):
+        target = node.find("./AutomationTarget")
+        target_id = target.get("Id") if target is not None else None
+        if envelopes is None or target_id is None:
+            return []
+        for envelope in list(envelopes):
+            pointee = envelope.find("./EnvelopeTarget/PointeeId")
+            if pointee is not None and pointee.get("Value") == target_id:
+                found = envelope.find("./Automation/Events")
+                return list(found) if found is not None else []
+        return []
+
+    def manual(node):
+        value = node.find("./Manual")
+        return value.get("Value") if value is not None else None
+
+    tempo = None
+    node = param("Tempo")
+    if node is not None:
+        points = []
+        for event in events(node):
+            if event.tag.rsplit("}", 1)[-1] != "FloatEvent":
+                continue
+            try:
+                points.append((float(event.get("Time")), float(event.get("Value"))))
+            except (TypeError, ValueError):
+                continue
+        if not points:
+            try:
+                points = [(0.0, float(manual(node)))]
+            except (TypeError, ValueError):
+                points = []
+        points.sort(key=lambda p: p[0])
+        tempo = tempo_events_to_map(points) or None
+
+    sig = None
+    node = param("TimeSignature")
+    if node is not None:
+        rows = []
+        for event in events(node):
+            if event.tag.rsplit("}", 1)[-1] != "EnumEvent":
+                continue
+            try:
+                num, den = _decode_als_sig(event.get("Value"))
+                rows.append([float(event.get("Time")), num, den])
+            except (TypeError, ValueError):
+                continue
+        if not rows:
+            try:
+                num, den = _decode_als_sig(manual(node))
+                rows = [[0.0, num, den]]
+            except (TypeError, ValueError):
+                rows = []
+        sig = normalize_sig_map(rows) or None
+    return tempo, sig
+
+
 class Collection(object):
     """並び順のあるもの（トラック、リターン、シーン、ある場所のデバイス）の扱い方。"""
 
@@ -132,27 +430,8 @@ class Model(object):
         self._clip_by_key = {}      # キー -> クリップ
         self._arrangement = []      # [クリップ, キー, 開始, 終了]（位置・長さの変化を定期的に見る用）
         self._poll_ticks = 0
-        self._last_locators = None
-        # Live cannot edit tempo/signature automation points through the Remote
-        # Script API. Keep a shadow of a richer map received from another DAW so
-        # unsupported points survive the next snapshot. For a saved .als, the
-        # best-effort XML reader below can recover tempo points edited in Live.
-        self._tempo_map_shadow = None
-        self._sig_map_shadow = None
-        self._tempo_file_stamp = None
-        self._tempo_file_map = None
-        self._tempo_remote_file_stamp = None
-        # Live's Remote Script API has no breakpoint/envelope writer.  Apply an
-        # incoming map once at the current cursor and then follow its rows during
-        # playback; keep the map as a shadow so unsupported points survive snapshots.
-        self._runtime_tempo_map = None
-        self._runtime_sig_map = None
-        self._runtime_tempo_index = 0
-        self._runtime_sig_index = 0
-        self._runtime_last_beat = None
-        self._runtime_pending_apply = False
-        self._runtime_applying = False
-        self._runtime_dirty = False
+        self._cue_removers = []     # ロケーターごとのリスナー（ロケーターが増えたら付け直す）
+        self._reset_timing()
         self._collections = {}      # id -> そのオブジェクトが属する Collection
         self._containers = {}       # 置き場所のキー -> (Track / Chain, Collection)
         self._unplaced = set()      # 並べ替えができず、並び順どおりに置けていないもの
@@ -230,24 +509,39 @@ class Model(object):
             song.create_scene(len(song.scenes))
         for scene in song.scenes:
             scene.name = ""
-        song.tempo = 120.0
-        song.signature_numerator = 4
-        song.signature_denominator = 4
+        self._reset_timing()
+        self._runtime_applying = True
+        try:
+            song.tempo = 120.0
+            song.signature_numerator = 4
+            song.signature_denominator = 4
+        finally:
+            self._runtime_applying = False
+        self._tempo_map_shadow = [[0.0, 120.0]]
+        self._sig_map_shadow = [[0.0, 4, 4]]
+        # 保存されている .als は消す前のセットのもの。そのオートメーションを「Live で書いた」と取り違えないよう、今の中身を覚えておく
+        self._poll_saved_timing(song, announce=False)
+        self.needs_rebuild = True
+
+    def _reset_timing(self):
         self._last_locators = None
+        # 再生中に届いたロケーター（Live は再生位置を動かさないとロケーターを作れないので、止まってから反映する）
+        self._pending_locators = None
+        self._cues_changed = False
+        # このセットのテンポ・拍子の変化（ルームと同じもの）。Live の API ではアレンジメントのオートメーションを
+        # 書き込めないので、ほかの DAW から届いたものはここに持っておき、再生中に song.tempo などを追従させる。
+        # Live で書いたオートメーションは、保存された .als から読む（_poll_saved_timing）
         self._tempo_map_shadow = None
         self._sig_map_shadow = None
-        self._tempo_file_stamp = None
-        self._tempo_file_map = None
-        self._tempo_remote_file_stamp = None
-        self._runtime_tempo_map = None
-        self._runtime_sig_map = None
-        self._runtime_tempo_index = 0
-        self._runtime_sig_index = 0
+        self._timing_file_stamp = None
+        self._file_tempo_map = None   # 最後に読んだ .als のテンポ（Live 自身のエンベロープ）
+        self._file_sig_map = None
+        self._tempo_follow_cache = None
         self._runtime_last_beat = None
         self._runtime_pending_apply = False
         self._runtime_applying = False
-        self._runtime_dirty = False
-        self.needs_rebuild = True
+        self._runtime_set_tempo = None
+        self._runtime_set_sig = None
 
     # --------------------------------------------------------- rebuild
 
@@ -320,14 +614,15 @@ class Model(object):
         self._apply_orphans()
 
     def _unbind(self):
-        for remove in self._removers:
+        for remove in self._removers + self._cue_removers:
             try:
                 remove()
             except Exception:
                 pass
         self._removers = []
+        self._cue_removers = []
 
-    def _listen(self, obj, prop, callback):
+    def _listen(self, obj, prop, callback, removers=None):
         try:
             getattr(obj, "add_%s_listener" % prop)(callback)
         except Exception:
@@ -336,7 +631,7 @@ class Model(object):
         def remover():
             if getattr(obj, "%s_has_listener" % prop)(callback):
                 getattr(obj, "remove_%s_listener" % prop)(callback)
-        self._removers.append(remover)
+        (self._removers if removers is None else removers).append(remover)
 
     def _mark(self, key):
         return lambda: self.dirty.add(key)
@@ -520,55 +815,26 @@ class Model(object):
         song = self.song
         changed = []
 
-        def set_tempo(v):
-            song.tempo = float(v)
-            if self._tempo_map_shadow and not self._runtime_applying:
-                zero = min(self._tempo_map_shadow, key=lambda row: abs(float(row[0])))
-                zero[1] = _round(song.tempo, 3)
-        def tempo_changed():
-            self.dirty.add("tempo")
-            if self._tempo_map_shadow and not self._runtime_applying:
-                zero = min(self._tempo_map_shadow, key=lambda row: abs(float(row[0])))
-                zero[1] = _round(song.tempo, 3)
-                self.dirty.add("tempo_map")
-        self._bind("tempo", lambda: _round(song.tempo, 3), set_tempo)
-        self._listen(song, "tempo", tempo_changed)
+        # テンポ・拍子。"tempo" / "sig" は拍 0 の値（古い相手との互換）、"tempo_map" / "sig_map" が途中の変化も含めた全体。
+        # Live の API ではアレンジメントのオートメーションを書き込めないので、届いた変化は再生中に追従させる
+        # （_apply_runtime_maps）。Live で書いたオートメーションは保存された .als から読む（_poll_saved_timing）
+        self._bind("tempo", lambda: _round(tempo_at(self._tempo_rows(song), 0.0), 3),
+                   lambda v: self._write_tempo(song, v))
+        self._bind("sig", lambda: sig_at(self._sig_rows(song), 0.0), lambda v: self._write_sig(song, v))
+        self._bind("tempo_map", lambda: [list(r) for r in self._tempo_rows(song)],
+                   lambda value: self._write_tempo_map(song, value))
+        self._bind("sig_map", lambda: [list(r) for r in self._sig_rows(song)],
+                   lambda value: self._write_sig_map(song, value))
+        self._listen(song, "tempo", self._tempo_changed)
+        self._listen(song, "signature_numerator", self._sig_changed)
+        self._listen(song, "signature_denominator", self._sig_changed)
 
-        def set_sig(v):
-            song.signature_numerator = int(v[0])
-            song.signature_denominator = int(v[1])
-            if self._sig_map_shadow and not self._runtime_applying:
-                zero = min(self._sig_map_shadow, key=lambda row: abs(float(row[0])))
-                zero[1], zero[2] = int(song.signature_numerator), int(song.signature_denominator)
-        def sig_changed():
-            self.dirty.add("sig")
-            if self._sig_map_shadow and not self._runtime_applying:
-                zero = min(self._sig_map_shadow, key=lambda row: abs(float(row[0])))
-                zero[1], zero[2] = int(song.signature_numerator), int(song.signature_denominator)
-                self.dirty.add("sig_map")
-        self._bind("sig", lambda: [song.signature_numerator, song.signature_denominator], set_sig)
-        self._listen(song, "signature_numerator", sig_changed)
-        self._listen(song, "signature_denominator", sig_changed)
-
-        # Arrangement のロケーターは Live の LOM から位置・名称を読み取れる。
-        # cue point の作成／削除 API は現在位置でトグルする set_or_delete_cue のみなので、
-        # 書き込み時は一時的に current_song_time を移動して操作し、最後に復元する。
-        self._bind("locators", lambda: self._read_locators(song),
-                   lambda value: self._write_locators(song, value), [(song, "cue_points")])
-        for cue in list(getattr(song, "cue_points", ()) or ()):
-            self._listen(cue, "name", self._mark("locators"))
-            self._listen(cue, "time", self._mark("locators"))
-
-        # Live の Remote Script API にはテンポ／拍子のアレンジメント・エンベロープを
-        # 直接編集する機能がない。ほかの DAW から届いたマップは拍 0 の基準値を反映し、
-        # 再生中は current_song_time に合わせて追従する。保存済み .als のテンポ点は
-        # XML から読み取れる。非ゼロ位置を Live のエンベロープへ直接書けないため警告するが、
-        # 受信したマップはシャドウとして保持し、次回スナップショットで他 DAW に返せるようにする。
-        self._bind("tempo_map", lambda: self._read_tempo_map(song),
-                   lambda value: self._write_tempo_map(song, value), [(song, "tempo")])
-        self._bind("sig_map", lambda: self._read_sig_map(song),
-                   lambda value: self._write_sig_map(song, value),
-                   [(song, "signature_numerator"), (song, "signature_denominator")])
+        # アレンジメントのロケーター。位置・名前は読めるが、作る・消すは「再生位置でのトグル」（set_or_delete_cue）
+        # しか無く、位置は変えられない（time は読み取りのみ）。なので書き込むときは再生位置を一時的に動かす
+        self._bind("locators", lambda: self._read_locators_value(song),
+                   lambda value: self._write_locators(song, value))
+        self._listen(song, "cue_points", self._cue_points_changed)
+        self._relisten_cues(song)
 
         for prop in ("tracks", "return_tracks", "scenes"):
             self._listen(song, prop, self._structure_changed)
@@ -610,6 +876,8 @@ class Model(object):
             changed += self._bind_devices("m", song.master_track)
         return changed
 
+    # ------------------------------------------------------------ ロケーター
+
     @staticmethod
     def _read_locators(song):
         result = []
@@ -620,48 +888,75 @@ class Model(object):
                 continue
         return sorted(result, key=lambda x: (x[0], x[1]))
 
+    def _read_locators_value(self, song):
+        # 再生中に届いてまだ反映していないものは、反映したことにして読む（古い今の状態を「変更」として送らないように）
+        if self._pending_locators is not None:
+            return [list(r) for r in self._pending_locators]
+        return self._read_locators(song)
+
+    def _cue_points_changed(self):
+        self._cues_changed = True
+        self.dirty.add("locators")
+
+    def _relisten_cues(self, song):
+        """ロケーターごとに名前・位置のリスナーを付け直す（増えたロケーターにも付くように）。"""
+        for remove in self._cue_removers:
+            try:
+                remove()
+            except Exception:
+                pass
+        self._cue_removers = []
+        self._cues_changed = False
+        for cue in list(getattr(song, "cue_points", ()) or ()):
+            self._listen(cue, "name", self._mark("locators"), self._cue_removers)
+            self._listen(cue, "time", self._mark("locators"), self._cue_removers)
+
     def _write_locators(self, song, value):
         wanted = []
-        for row in value or []:
-            if not isinstance(row, (list, tuple)) or len(row) < 2:
-                continue
-            try:
-                wanted.append((_round(row[0]), str(row[1])))
-            except (TypeError, ValueError):
-                continue
-        wanted.sort(key=lambda x: (x[0], x[1]))
+        for beat, name in normalize_locators(value):
+            # Live では同じ位置に 2 つ置けない（同じ位置でもう一度トグルすると消える）。最初のものを使う
+            if not wanted or wanted[-1][0] != beat:
+                wanted.append([beat, name])
+        if getattr(song, "is_playing", False):
+            # 再生中に再生位置を動かすと、再生している人の音が飛ぶ。止まってから反映する
+            self._pending_locators = wanted
+            return
+        self._pending_locators = None
+        self._apply_locators_now(song, wanted)
+
+    def _apply_locators_now(self, song, wanted):
         current = []
         for cue in list(getattr(song, "cue_points", ()) or ()):
             try:
                 current.append((cue, _round(cue.time), str(getattr(cue, "name", ""))))
             except Exception:
                 pass
-        # Match by exact beat/name first, then by beat. Matching by beat lets a rename avoid
-        # deleting/recreating the marker and preserves Live's internal cue identity.
+        # 同じ位置・名前のもの、次に同じ位置のもの（名前だけ変わった）を残す。消して作り直さないので、
+        # Live の中のロケーターはそのまま（選択なども外れない）
         used = set()
         matched = []
         for beat, name in wanted:
-            hit = next((x for n, x in enumerate(current)
-                        if n not in used and x[1] == beat and x[2] == name), None)
+            hit = next((n for n, x in enumerate(current) if n not in used and x[1] == beat and x[2] == name), None)
             if hit is None:
-                hit = next((x for n, x in enumerate(current) if n not in used and x[1] == beat), None)
-            matched.append((beat, name, hit))
+                hit = next((n for n, x in enumerate(current) if n not in used and x[1] == beat), None)
             if hit is not None:
-                used.add(current.index(hit))
+                used.add(hit)
+            matched.append((beat, name, hit))
         old_time = getattr(song, "current_song_time", None)
         try:
-            for cue, beat, name in current:
-                if not any(hit is not None and hit[0] is cue for _, _, hit in matched):
+            for n, (cue, beat, name) in enumerate(current):
+                if n not in used:
                     song.current_song_time = beat
                     song.set_or_delete_cue()
             for beat, name, hit in matched:
-                if hit is None:
+                cue = current[hit][0] if hit is not None else None
+                if cue is None:
                     song.current_song_time = beat
                     song.set_or_delete_cue()
-                    hit = next((x for x in list(getattr(song, "cue_points", ()) or ())
+                    cue = next((x for x in list(getattr(song, "cue_points", ()) or ())
                                 if abs(float(x.time) - beat) < 1e-4), None)
-                if hit is not None:
-                    (hit[0] if isinstance(hit, tuple) else hit).name = name
+                if cue is not None and str(getattr(cue, "name", "")) != name:
+                    cue.name = name
         finally:
             if old_time is not None:
                 try:
@@ -669,227 +964,287 @@ class Model(object):
                 except Exception:
                     pass
         self._last_locators = self._read_locators(song)
+        self._relisten_cues(song)
 
-    def _write_tempo_map(self, song, value):
-        rows = [r for r in (value or []) if isinstance(r, (list, tuple)) and len(r) >= 2]
-        if rows:
-            self._tempo_map_shadow = sorted([[float(r[0]), _round(float(r[1]), 3)] for r in rows], key=lambda r: r[0])
-            self._runtime_tempo_map = [list(row) for row in self._tempo_map_shadow]
-            self._runtime_tempo_index = 0
-            self._runtime_last_beat = None
-            self._runtime_pending_apply = True
-            path = getattr(song, "file_path", None)
-            try:
-                stat = os.stat(path) if path else None
-                self._tempo_remote_file_stamp = (int(stat.st_mtime_ns), int(stat.st_size)) if stat else None
-            except (OSError, TypeError, ValueError):
-                self._tempo_remote_file_stamp = None
-            zero = min(rows, key=lambda r: abs(float(r[0])))
-            try:
-                song.tempo = float(zero[1])
-            except (TypeError, ValueError):
-                pass
-        if any(abs(float(r[0])) > 1e-5 for r in rows):
-            self._warn_once("tempo-map", "Live の Remote Script API ではテンポ・オートメーションの点を編集できないため、拍 0 と現在位置を反映し、再生中は各拍でBPMを追従します（Global Record/Automation Arm が有効ならLive側で記録されます）")
-        elif not rows:
-            self._tempo_map_shadow = None
-            self._runtime_tempo_map = None
-            self._runtime_tempo_index = 0
-            self._runtime_pending_apply = False
-            self._tempo_remote_file_stamp = None
-
-    def _write_sig_map(self, song, value):
-        rows = [r for r in (value or []) if isinstance(r, (list, tuple)) and len(r) >= 3]
-        if rows:
-            self._sig_map_shadow = sorted([[float(r[0]), int(r[1]), int(r[2])] for r in rows], key=lambda r: r[0])
-            self._runtime_sig_map = [list(row) for row in self._sig_map_shadow]
-            self._runtime_sig_index = 0
-            self._runtime_last_beat = None
-            self._runtime_pending_apply = True
-            zero = min(rows, key=lambda r: abs(float(r[0])))
-            try:
-                song.signature_numerator = int(zero[1])
-                song.signature_denominator = int(zero[2])
-            except (TypeError, ValueError):
-                pass
-        if any(abs(float(r[0])) > 1e-5 for r in rows):
-            self._warn_once("sig-map", "Live の Remote Script API ではアレンジメント拍子変更の点を編集できないため、拍 0 と現在位置を反映し、再生中は各拍で拍子を追従します")
-        elif not rows:
-            self._sig_map_shadow = None
-            self._runtime_sig_map = None
-            self._runtime_sig_index = 0
-            self._runtime_pending_apply = False
-
-    def _apply_runtime_maps(self):
-        """Live のグローバル値を受信したマップに追従させる。
-
-        Live の Python API にはエンベロープのブレークポイントを挿入する
-        メソッドがないため、停止中のセットへ擬似的な点を作ることはできない。
-        受信直後は現在のカーソル位置の実効値を一度だけ反映し、再生中は各拍で
-        ``song.tempo`` / 拍子を更新する。受信直後の一度きりの反映が終わったら、
-        停止中にユーザーが編集した値を上書きしない。
-        """
+    def _flush_pending_locators(self):
+        """再生中に届いたロケーターを、止まったら反映する。"""
         song = self.song
-        playing = bool(getattr(song, "is_playing", False))
-        if not playing and not self._runtime_pending_apply:
-            self._runtime_last_beat = None
-            self._runtime_tempo_index = 0
-            self._runtime_sig_index = 0
+        if self._pending_locators is None or getattr(song, "is_playing", False):
             return
+        wanted, self._pending_locators = self._pending_locators, None
+        undo = getattr(song, "begin_undo_step", None)
         try:
-            beat = float(song.current_song_time)
+            if undo is not None:
+                undo()
+            self._apply_locators_now(song, wanted)
+        finally:
+            if undo is not None:
+                try:
+                    song.end_undo_step()
+                except Exception:
+                    pass
+        # 届いた値を反映しただけなので送らない（Live が置けなかった分の違いだけは、次に読んだときに送られる）
+        self.last["locators"] = [list(r) for r in wanted]
+        self.dirty.discard("locators")
+
+    # ------------------------------------------------------------ テンポ・拍子
+
+    def _tempo_rows(self, song):
+        self._ensure_timing(song)
+        return self._tempo_map_shadow
+
+    def _sig_rows(self, song):
+        self._ensure_timing(song)
+        return self._sig_map_shadow
+
+    def _ensure_timing(self, song):
+        """最初に読むとき、今のセットのテンポ・拍子の変化を決める（保存された .als にオートメーションがあればそれ）。"""
+        if self._tempo_map_shadow is not None and self._sig_map_shadow is not None:
+            return
+        self._poll_saved_timing(song, announce=False)
+        if self._tempo_map_shadow is None:
+            if self._file_tempo_map and tempo_map_varies(self._file_tempo_map):
+                self._tempo_map_shadow = [list(r) for r in self._file_tempo_map]
+            else:
+                self._tempo_map_shadow = [[0.0, _round(song.tempo, 3)]]
+        if self._sig_map_shadow is None:
+            if self._file_sig_map and sig_map_varies(self._file_sig_map):
+                self._sig_map_shadow = [list(r) for r in self._file_sig_map]
+            else:
+                self._sig_map_shadow = [[0.0, int(song.signature_numerator), int(song.signature_denominator)]]
+
+    def _cursor(self, song):
+        try:
+            return float(song.current_song_time)
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+
+    def _cursor_moved(self, song):
+        """前の tick から再生位置が動いたか（Live 自身のオートメーションが、動かした位置の値にテンポを変えることがある）。"""
+        return self._runtime_last_beat is not None and abs(self._cursor(song) - self._runtime_last_beat) > 1e-6
+
+    @staticmethod
+    def _live_tempo_automation(song):
+        """Live 自身のテンポのオートメーションの状態（0: 無い、1: 再生している、2: 手で変えて止まっている）。"""
+        try:
+            return int(song.master_track.mixer_device.song_tempo.automation_state)
+        except Exception:
+            return 0
+
+    def _tempo_changed(self):
+        song = self.song
+        tempo = _round(song.tempo, 3)
+        if self._runtime_applying or (self._runtime_set_tempo is not None and abs(tempo - self._runtime_set_tempo) < 1e-3):
+            return  # 届いた変化に追従させたもの
+        self._runtime_set_tempo = None
+        if self._live_tempo_automation(song) != 0:
+            # Live のオートメーションが動かしている（手で変えたものも、Live ではその場だけの上書き）。
+            # オートメーション自体の変更は、保存したときに .als から読む
+            return
+        rows = self._tempo_rows(song)
+        if not tempo_map_varies(rows):
+            self._tempo_map_shadow = [[0.0, tempo]]
+            self.dirty.update(("tempo", "tempo_map"))
+            return
+        # 途中でテンポが変わるセット。止まっているときに手で変えたら、再生位置の区間の BPM を変えたことにする
+        if getattr(song, "is_playing", False) or self._cursor_moved(song):
+            return
+        beat = self._cursor(song)
+        if abs(tempo_at(rows, beat) - tempo) <= TEMPO_EPS:
+            return
+        self._tempo_map_shadow = set_tempo_at(rows, beat, tempo)
+        self.dirty.update(("tempo", "tempo_map"))
+
+    def _sig_changed(self):
+        song = self.song
+        try:
+            sig = [int(song.signature_numerator), int(song.signature_denominator)]
         except (AttributeError, TypeError, ValueError):
             return
+        if self._runtime_applying or self._runtime_set_sig == sig:
+            return
+        self._runtime_set_sig = None
+        if getattr(song, "is_playing", False) or self._cursor_moved(song):
+            return  # 再生中・位置を動かしたときは、Live の拍子の変化に合わせて変わったもの
+        rows = self._sig_rows(song)
+        if not sig_map_varies(rows):
+            self._sig_map_shadow = [[0.0, sig[0], sig[1]]]
+            self.dirty.update(("sig", "sig_map"))
+            return
+        beat = self._cursor(song)
+        if sig_at(rows, beat) == sig:
+            return
+        self._sig_map_shadow = set_sig_at(rows, beat, sig[0], sig[1])
+        self.dirty.update(("sig", "sig_map"))
 
-        # ループやシークで時間が戻ったら、次の再生で先頭から適用する。
-        if self._runtime_last_beat is not None and beat + 1e-4 < self._runtime_last_beat:
-            self._runtime_tempo_index = 0
-            self._runtime_sig_index = 0
+    def _batch_has(self, key):
+        applying = getattr(self, "_applying", None)
+        return applying is not None and key in applying
+
+    def _write_tempo(self, song, value):
+        if self._batch_has("tempo_map"):
+            return  # 同じまとまりの tempo_map の方が詳しい（拍 0 の値もそちらに入っている）
+        try:
+            bpm = float(value)
+        except (TypeError, ValueError):
+            return
+        rows = self._tempo_rows(song)
+        if tempo_map_varies(rows):
+            self._tempo_map_shadow = set_tempo_at(rows, 0.0, bpm)
+        else:
+            self._tempo_map_shadow = [[0.0, _round(bpm, 3)]]
+        self._runtime_pending_apply = True
+        self._apply_runtime_maps()
+
+    def _write_sig(self, song, value):
+        if self._batch_has("sig_map") or not isinstance(value, (list, tuple)) or len(value) < 2:
+            return
+        try:
+            num, den = int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return
+        rows = self._sig_rows(song)
+        if sig_map_varies(rows):
+            self._sig_map_shadow = set_sig_at(rows, 0.0, num, den)
+        else:
+            self._sig_map_shadow = [[0.0, num, den]]
+        self._runtime_pending_apply = True
+        self._apply_runtime_maps()
+
+    def _write_tempo_map(self, song, value):
+        rows = normalize_tempo_map(value)
+        if not rows:
+            return
+        self._ensure_timing(song)
+        self._tempo_map_shadow = rows
+        self._runtime_pending_apply = True
+        if len(rows) > 1:
+            self._warn_once("tempo-map", "Live の API ではアレンジメントのテンポ・オートメーションを書き込めないので、"
+                                         "届いたテンポの変化には再生中に追従させています（Live のオートメーションには残りません）")
+        self._apply_runtime_maps()
+
+    def _write_sig_map(self, song, value):
+        rows = normalize_sig_map(value)
+        if not rows:
+            return
+        self._ensure_timing(song)
+        self._sig_map_shadow = rows
+        self._runtime_pending_apply = True
+        if len(rows) > 1:
+            self._warn_once("sig-map", "Live の API ではアレンジメントの拍子の変化を書き込めないので、"
+                                       "届いた拍子の変化には再生中に追従させています")
+        self._apply_runtime_maps()
+
+    def _follow_tempo(self, song):
+        """届いたテンポの変化に song.tempo を追従させるか。Live 自身のオートメーションが同じ変化を
+        再生しているなら任せる（追従させて上書きすると、Live のオートメーションが止まってしまう）。"""
+        key = (id(self._tempo_map_shadow), id(self._file_tempo_map))
+        if self._tempo_follow_cache is None or self._tempo_follow_cache[0] != key:
+            same = bool(self._file_tempo_map) and tempo_map_varies(self._file_tempo_map) \
+                and tempo_maps_close(self._tempo_map_shadow, self._file_tempo_map, 0.05)
+            self._tempo_follow_cache = (key, same)
+        return not (self._tempo_follow_cache[1] and self._live_tempo_automation(song) == 1)
+
+    def _apply_runtime_maps(self):
+        """Live のテンポ・拍子を、このセットのテンポ・拍子の変化に追従させる。
+
+        Live の API にはアレンジメントのオートメーションの点を書き込む方法が無いので、再生中は今の位置の値を
+        song.tempo などに入れ続ける（Global Record と Automation Arm が有効なら、Live 側でオートメーションとして録音される）。
+        止まっているときは、届いた直後と、再生位置を動かしたときだけ合わせる（手で変えた値をすぐ上書きしないように）。
+        """
+        song = self.song
+        beat = self._cursor(song)
+        moved = self._runtime_last_beat is None or abs(beat - self._runtime_last_beat) > 1e-6
         self._runtime_last_beat = beat
-
-        rows = self._runtime_tempo_map or ()
-        while self._runtime_tempo_index + 1 < len(rows) and beat + 1e-4 >= float(rows[self._runtime_tempo_index + 1][0]):
-            self._runtime_tempo_index += 1
-        if rows:
-            target = float(rows[self._runtime_tempo_index][1])
+        playing = bool(getattr(song, "is_playing", False))
+        tempo_rows, sig_rows = self._tempo_map_shadow, self._sig_map_shadow
+        varies = (tempo_rows is not None and len(tempo_rows) > 1) or (sig_rows is not None and len(sig_rows) > 1)
+        if not (playing or self._runtime_pending_apply or (moved and varies)):
+            return
+        self._runtime_pending_apply = False
+        if tempo_rows and self._follow_tempo(song):
+            target = _round(tempo_at(tempo_rows, beat), 3)
+            # ランプの途中は 0.25 BPM ずつ変える（細かく変え続けると、Live の取り消しの履歴がテンポの変更で埋まる）
+            step = RAMP_STEP if _in_ramp(tempo_rows, beat) else 1e-3
             try:
-                if abs(float(song.tempo) - target) > 1e-3:
+                if abs(float(song.tempo) - target) >= step:
                     self._runtime_applying = True
                     try:
                         song.tempo = target
                     finally:
                         self._runtime_applying = False
-                    self._runtime_dirty = True
+                    # 通知が後から来ても、自分の変更とわかるように
+                    self._runtime_set_tempo = target
             except (AttributeError, TypeError, ValueError):
                 pass
-
-        rows = self._runtime_sig_map or ()
-        while self._runtime_sig_index + 1 < len(rows) and beat + 1e-4 >= float(rows[self._runtime_sig_index + 1][0]):
-            self._runtime_sig_index += 1
-        if rows:
-            target_num, target_den = int(rows[self._runtime_sig_index][1]), int(rows[self._runtime_sig_index][2])
+        if sig_rows:
+            target = sig_at(sig_rows, beat)
             try:
-                if (int(song.signature_numerator), int(song.signature_denominator)) != (target_num, target_den):
+                if [int(song.signature_numerator), int(song.signature_denominator)] != target:
                     self._runtime_applying = True
                     try:
-                        song.signature_numerator = target_num
-                        song.signature_denominator = target_den
+                        song.signature_numerator = target[0]
+                        song.signature_denominator = target[1]
                     finally:
                         self._runtime_applying = False
-                    self._runtime_dirty = True
+                    self._runtime_set_sig = list(target)
             except (AttributeError, TypeError, ValueError):
                 pass
 
-        if not playing:
-            self._runtime_pending_apply = False
+    # ------------------------------------------------- 保存された .als のテンポ・拍子
 
-    def _read_tempo_map(self, song):
-        saved = self._read_saved_tempo_map(song)
-        if saved is not None:
-            stamp, rows = saved
-            # A map received from another DAW remains authoritative until the
-            # user saves the Live Set afterwards. This avoids replacing an
-            # in-memory incoming map with an older copy still on disk.
-            if self._tempo_remote_file_stamp is None or stamp > self._tempo_remote_file_stamp:
-                if rows != self._tempo_map_shadow:
-                    self._tempo_map_shadow = [list(row) for row in rows]
-                    self._runtime_tempo_map = [list(row) for row in rows]
-                    self._runtime_tempo_index = 0
-                    self._runtime_last_beat = None
-                self._tempo_remote_file_stamp = None
-                return [list(row) for row in rows]
-        if self._tempo_map_shadow:
-            return [list(row) for row in self._tempo_map_shadow]
-        return [[0.0, _round(song.tempo, 3)]]
-
-    def _read_saved_tempo_map(self, song):
-        """Read Live's saved Arrangement tempo envelope when it is available.
-
-        The `.als` file is a gzip-compressed XML document. Live's public Python
-        API exposes the current tempo value but not Arrangement envelope points,
-        so this reader is intentionally best effort and only runs when the set
-        has a saved path and its file stamp changes. Live may keep unsaved edits
-        in memory; those are handled by the runtime map/shadow instead.
+    def _poll_saved_timing(self, song=None, announce=True):
         """
+        保存された .als から、Live のアレンジメントのテンポ・拍子のオートメーションを読む（保存したときだけ）。
+        Live の API ではオートメーションの点を読めないので、Live で書いたオートメーションは保存したときに届く。
+        .als には、ほかの DAW から届いた変化は入らない（書き込めない）ので、前に読んだときと比べて
+        Live のオートメーションが変わったときだけ「変更」とする（そうしないと、保存するたびにルームの
+        テンポの変化を古いもので上書きしてしまう）。
+        """
+        song = song or self.song
         path = getattr(song, "file_path", None)
         if not path:
-            return None
+            return
         try:
             stat = os.stat(path)
             stamp = (int(stat.st_mtime_ns), int(stat.st_size))
         except (OSError, TypeError, ValueError):
-            return None
-        if stamp == self._tempo_file_stamp:
-            if self._tempo_file_map is None:
-                return None
-            return stamp, [list(row) for row in self._tempo_file_map]
-        try:
-            with gzip.open(path, "rb") as stream:
-                root = ET.parse(stream).getroot()
-        except (OSError, EOFError, ET.ParseError, gzip.BadGzipFile, ValueError):
-            return None
+            return
+        if stamp == self._timing_file_stamp:
+            return
+        self._timing_file_stamp = stamp
+        parsed = _read_als_timing(path)
+        if parsed is None:
+            return
+        tempo, sig = parsed
+        old_tempo, old_sig = self._file_tempo_map, self._file_sig_map
+        self._file_tempo_map, self._file_sig_map = tempo, sig
+        if not announce:
+            return
+        if tempo and self._tempo_map_shadow is not None and self._edited_on_save(
+                tempo, old_tempo, self._tempo_map_shadow, tempo_map_varies,
+                lambda a, b: tempo_maps_close(a, b, 0.05)):
+            self._tempo_map_shadow = tempo
+            self._runtime_pending_apply = True
+            self.dirty.update(("tempo", "tempo_map"))
+        if sig and self._sig_map_shadow is not None and self._edited_on_save(
+                sig, old_sig, self._sig_map_shadow, sig_map_varies,
+                lambda a, b: normalize_sig_map(a) == normalize_sig_map(b)):
+            self._sig_map_shadow = sig
+            self._runtime_pending_apply = True
+            self.dirty.update(("sig", "sig_map"))
 
-        result = None
-        for track_name in ("MainTrack", "MasterTrack"):
-            track = root.find(".//%s" % track_name)
-            if track is None:
-                continue
-            tempo = track.find("./DeviceChain/Mixer/Tempo")
-            if tempo is None:
-                tempo = track.find(".//Tempo")
-            if tempo is None:
-                continue
-            manual = tempo.find("./Manual")
-            try:
-                base = float(manual.get("Value")) if manual is not None else float(song.tempo)
-            except (AttributeError, TypeError, ValueError):
-                base = float(song.tempo)
-
-            target = tempo.find("./AutomationTarget")
-            target_id = target.get("Id") if target is not None else None
-            envelopes = track.find("./AutomationEnvelopes/Envelopes")
-            if envelopes is None:
-                continue
-            events = None
-            for envelope in list(envelopes):
-                pointee = envelope.find("./EnvelopeTarget/PointeeId")
-                if target_id is not None and (pointee is None or pointee.get("Value") != target_id):
-                    continue
-                candidate = envelope.find("./Automation/Events")
-                if candidate is not None:
-                    events = candidate
-                    break
-            if events is None:
-                continue
-
-            points = {}
-            for event in list(events):
-                if event.tag.rsplit("}", 1)[-1] != "FloatEvent":
-                    continue
-                try:
-                    beat = float(event.get("Time"))
-                    bpm = float(event.get("Value"))
-                except (TypeError, ValueError):
-                    continue
-                # Live stores a negative sentinel event for the manual value.
-                if beat >= 0.0 and bpm > 0.0:
-                    points[_time_key(beat)] = [_round(beat), _round(bpm, 3)]
-            rows = [points[key] for key in sorted(points, key=float)]
-            if not rows or rows[0][0] > 1e-5:
-                rows.insert(0, [0.0, _round(base, 3)])
-            result = rows
-            break
-
-        self._tempo_file_stamp = stamp
-        self._tempo_file_map = [list(row) for row in result] if result else None
-        if result is None:
-            return None
-        return stamp, [list(row) for row in result]
-
-    def _read_sig_map(self, song):
-        if self._sig_map_shadow:
-            return [list(row) for row in self._sig_map_shadow]
-        return [[0.0, int(song.signature_numerator), int(song.signature_denominator)]]
+    @staticmethod
+    def _edited_on_save(new, old, shadow, varies, same):
+        if same(new, shadow):
+            return False  # もう同じ（届いた変化を Live で録音して保存した、など）
+        if old is not None and same(new, old):
+            return False  # Live のオートメーションは前に保存したときのまま
+        if varies(new):
+            return True   # Live でオートメーションを書いた・直した
+        # オートメーションの無い .als。前はあったなら、Live でオートメーションを消した。
+        # 前から無ければ、手で変えたテンポ（それはリスナーで送っている）か、届いた変化に追従させた値なので送らない
+        return old is not None and varies(old)
 
     def _bind_named(self, prefix, obj, mute_solo):
         def setter(name, cast):
@@ -1675,21 +2030,15 @@ class Model(object):
         """
         self._poll_ticks += 1
         if "tempo_map" in self.bindings:
-            saved = self._read_saved_tempo_map(self.song)
-            if saved is not None:
-                stamp, rows = saved
-                remote_stamp = self._tempo_remote_file_stamp
-                if remote_stamp is None or stamp > remote_stamp:
-                    if rows != self.last.get("tempo_map"):
-                        self.dirty.add("tempo_map")
+            self._poll_saved_timing()
+        if self._cues_changed:
+            self._relisten_cues(self.song)  # 増えたロケーターにもリスナーを付ける
         if self._poll_ticks < 10:
             return
         self._poll_ticks = 0
-        # Live cue point positions are read-only and some Live versions do not emit a
-        # cue_points notification when a marker is dragged. Poll the compact value so
-        # moves and renames still reach the other DAWs.
-        if "locators" in self.bindings:
-            now_locators = self.read("locators")
+        # ロケーターをドラッグしても通知が来ない Live のバージョンがあるので、念のため直接見る
+        if "locators" in self.bindings and self._pending_locators is None:
+            now_locators = self._read_locators(self.song)
             if self._last_locators is None:
                 self._last_locators = now_locators
             elif now_locators != self._last_locators:
@@ -1716,22 +2065,9 @@ class Model(object):
         self.removed = set()
 
     def collect_changes(self):
-        # Apply tempo/signature map rows before collecting dirty keys.  Values
-        # changed by this scheduler are derived from tempo_map/sig_map and must
-        # not be sent back as independent edits on every poll.
+        # 届いたテンポ・拍子の変化に追従させる（これで変わった song.tempo などはリスナーが無視する）
         self._apply_runtime_maps()
-        if self._runtime_dirty:
-            self.dirty.discard("tempo")
-            self.dirty.discard("sig")
-            # Runtime map playback changes the same Song properties that are
-            # listened to by both scalar and map bindings. They are derived
-            # values, so do not echo them back as a new map operation.
-            self.dirty.discard("tempo_map")
-            self.dirty.discard("sig_map")
-            for key in ("tempo", "sig", "tempo_map", "sig_map"):
-                if key in self.bindings:
-                    self.last[key] = self.read(key)
-            self._runtime_dirty = False
+        self._flush_pending_locators()
         self._poll_arrangement()
         ops = []
         for key in self.removed:

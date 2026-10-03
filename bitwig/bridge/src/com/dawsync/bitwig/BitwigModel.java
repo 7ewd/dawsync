@@ -38,8 +38,8 @@ import com.bitwig.extension.api.project.track.TrackType;
 /**
  * Bitwig のプロジェクトを「キー → 値」の集まりとして読み書きする。キーと値の形は Live 用の model.py と同じ。
  *
- *   tempo, sig, locators ([[beat, name], ...]), tempo_map ([[beat, bpm], ...]),
- *   sig_map ([[beat, numerator, denominator], ...])
+ *   tempo, sig（拍 0 の値）, locators ([[拍, 名前], ...]),
+ *   tempo_map ([[拍, BPM] か [拍, BPM, 1（次の点まで直線）], ...]), sig_map ([[拍, 分子, 分母], ...])（TimingMaps を参照）
  *   t/<id>                  {"o": 並び順, "k": midi|audio|group, "g": 入っているグループの id}
  *   t/<id>/name|color（ミュート・ソロは各自のものなので同期しない）
  *   c/a/<トラック id>/<開始位置>  アレンジャーのクリップ {"k", "len", "dur", "n" or "file", "p"}
@@ -84,16 +84,24 @@ final class BitwigModel {
     private boolean initialized;
     private boolean baselineNext;
 
-    // Bitwig の公開 API は tempo/time-signature automation の読み出しを提供しないため、
-    // DawSync が最後に書き込んだマップを保持する。新規プロジェクトでは現在値を beat 0
-    // の点として返す。Cue marker は公開 API で完全に読み書きできる。
+    // テンポ・拍子の変化。Bitwig の API ではオートメーションを書けるが直接は読めないので、DAWproject への書き出し
+    // （Project.exportDawProject。プロジェクト全体を変換するので重い）で読む。書き出しは間隔を空けて行い、
+    // 間は最後に読んだもの・書いたものを使う（TimingMaps の形）。
     private List<List<Object>> tempoMapCache;
     private List<List<Object>> sigMapCache;
+    private List<List<Object>> exportedTempo;  // 最後に書き出したときのテンポのオートメーション（無ければ空、読めなければ null）
+    private List<List<Object>> exportedSig;
+    private int exportedTempoPoints, exportedSigPoints;  // オートメーションの点の数（平らでも点があればオートメーションがある）
+    private long lastExport;
+    private long exportCost;
+    private boolean exportBroken;
+    private boolean exportNeeded = true;
 
     // 最後に読んだときのトラック
     private final Map<String, TrackOrTrackGroup> tracks = new HashMap<>();
     private final Map<String, String> parents = new HashMap<>();
     private Set<String> batchDeletes = Set.of();
+    private Set<String> applyingKeys = Set.of();  // 今反映しているまとまりのキー
 
     BitwigModel(Object dig, Project api, Internals in, Output out) throws ReflectiveOperationException {
         this.dig = dig;
@@ -135,29 +143,22 @@ final class BitwigModel {
     /** 今のプロジェクトを全部読む。 */
     Map<String, Object> readAll() {
         Map<String, Object> state = new LinkedHashMap<>();
-        Transport transport = api.getTransport();
-        double currentTempo = round(transport.getTempo().getValue(Unit.BPM), 3);
-        state.put("tempo", currentTempo);
-        var sig = transport.getTimeSignature();
-        state.put("sig", List.of((double) sig.getNumerator(), (double) sig.getDenominator()));
+        // アレンジャーのテンポ・拍子の変化。"tempo" / "sig" は拍 0 の値（古い相手との互換）
+        List<List<Object>> tempoMap = currentTempoMap(), sigMap = currentSigMap();
+        state.put("tempo", round(TimingMaps.tempoAt(tempoMap, 0), 3));
+        int[] sig0 = TimingMaps.sigAt(sigMap, 0);
+        state.put("sig", List.of((double) sig0[0], (double) sig0[1]));
+        state.put("tempo_map", tempoMap);
+        state.put("sig_map", sigMap);
 
-        // Project.getCueMarkers() is part of the public Bitwig project API.  The sync
-        // protocol uses beat positions, which are also the positions used by Bitwig's
-        // arrangement timeline.
+        // アレンジャーのキューマーカー（位置は拍）
         List<List<Object>> locators = new ArrayList<>();
         for (Object event : api.getCueMarkers().getEvents()) {
             if (!(event instanceof CueMarker marker)) continue;
             locators.add(List.of(round(marker.getTime()), marker.getTitle() == null ? "" : marker.getTitle()));
         }
-        locators.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
+        locators.sort(Comparator.<List<Object>>comparingDouble(v -> Json.num(v.get(0), 0)).thenComparing(v -> String.valueOf(v.get(1))));
         state.put("locators", locators);
-
-        if (tempoMapCache == null || tempoMapCache.isEmpty())
-            tempoMapCache = new ArrayList<>(List.of(List.of(0.0, currentTempo)));
-        state.put("tempo_map", tempoMapCache);
-        if (sigMapCache == null || sigMapCache.isEmpty())
-            sigMapCache = new ArrayList<>(List.of(List.of(0.0, (double) sig.getNumerator(), (double) sig.getDenominator())));
-        state.put("sig_map", sigMapCache);
 
         List<TrackOrTrackGroup> flat = new ArrayList<>();
         List<String> ignored = new ArrayList<>();
@@ -407,11 +408,9 @@ final class BitwigModel {
     /** まっさらにする（楽器トラック 1 本、テンポ 120、4/4）。 */
     void makeBlank() throws ReflectiveOperationException {
         // テンポなどのパラメータは、トラックを消すより先に変える（後だとオーディオエンジンが落ちる。PARAMETERS_FIRST を参照）
-        Transport transport = api.getTransport();
-        transport.getTempo().setValue(120.0, Unit.BPM);
-        transport.setTimeSignature(factory.createTimeSignature(4, 4, transport.getTimeSignature().getTickRate()));
-        tempoMapCache = new ArrayList<>(List.of(List.of(0.0, 120.0)));
-        sigMapCache = new ArrayList<>(List.of(List.of(0.0, 4.0, 4.0)));
+        refreshExport(true);  // テンポのオートメーションがあれば、それも消す
+        writeTempo(TimingMaps.normalizeTempo(List.of(List.of(0.0, 120.0))));
+        writeSig(TimingMaps.normalizeSig(List.of(List.of(0.0, 4.0, 4.0))));
         Track keep = factory.createInstrumentTrack();
         TrackGroup root = api.getTrackGroup();
         in.insertTrack(Internals.target(root), Internals.target(keep), 0);
@@ -502,6 +501,7 @@ final class BitwigModel {
         // なので、今あるものへのパラメータの変更を先にやり、消した後に残ったパラメータの変更は次の tick に回す。
         findMoves(ops);
         structuralDelete = false;
+        applyingKeys = batchKeys;
         Set<String> applied = new HashSet<>();
         List<Map<String, Object>> rest = new ArrayList<>();
         for (Map<String, Object> op : ops) {
@@ -522,6 +522,7 @@ final class BitwigModel {
             if (applyOne(key, op.get("v"))) applied.add(key);
             if (op.get("v") == null) deleted = true;
         }
+        applyingKeys = Set.of();
         applyOrphans(applied, deleted || structuralDelete);
         batchDeletes = Set.of();
         moves.clear();
@@ -561,7 +562,8 @@ final class BitwigModel {
 
     /** オーディオエンジンにすぐ伝わる「パラメータ」のキー（PARAMETERS_FIRST を参照）。 */
     private static boolean isParameter(String key) {
-        return key.equals("tempo") || key.equals("sig") || key.endsWith("/mute") || key.endsWith("/solo")
+        return key.equals("tempo") || key.equals("sig") || key.equals("tempo_map") || key.equals("sig_map")
+                || key.endsWith("/mute") || key.endsWith("/solo")
                 || key.endsWith("/vol") || key.endsWith("/pan") || key.contains("/send/");
     }
 
@@ -771,29 +773,31 @@ final class BitwigModel {
             String[] parts = key.split("/");
             switch (parts[0]) {
                 case "tempo" -> {
+                    // 拍 0 のテンポ（古い相手との互換）。同じまとまりに tempo_map があれば、そちらの方が詳しい
+                    if (applyingKeys.contains("tempo_map") || !(value instanceof Number)) return true;
                     double bpm = Json.num(value, 120);
-                    if (Math.abs(api.getTransport().getTempo().getValue(Unit.BPM) - bpm) > 1e-6)
-                        api.getTransport().getTempo().setValue(bpm, Unit.BPM);
-                    // Keep any non-zero automation points already received.  The
-                    // scalar key is sent alongside tempo_map by older and newer
-                    // peers, and should only update the map's beat-zero value.
-                    tempoMapCache = withTempoBaseline(tempoMapCache, bpm);
+                    List<List<Object>> rows = currentTempoMap();
+                    writeTempo(TimingMaps.tempoVaries(rows) ? TimingMaps.setTempoAt(rows, 0, bpm)
+                            : TimingMaps.normalizeTempo(List.of(List.of(0.0, bpm))));
                 }
                 case "sig" -> {
                     List<Object> l = Json.list(value);
+                    if (applyingKeys.contains("sig_map")) return true;
                     if (l == null || l.size() < 2) return false;
-                    Transport transport = api.getTransport();
-                    var current = transport.getTimeSignature();
                     int num = (int) Json.num(l.get(0), 4), den = (int) Json.num(l.get(1), 4);
-                    if (current.getNumerator() != num || current.getDenominator() != den)
-                        transport.setTimeSignature(factory.createTimeSignature(num, den, current.getTickRate()));
-                    // As with tempo, preserve non-zero signature changes when a
-                    // compatibility scalar update arrives in the same batch.
-                    sigMapCache = withSigBaseline(sigMapCache, num, den);
+                    List<List<Object>> rows = currentSigMap();
+                    writeSig(TimingMaps.sigVaries(rows) ? TimingMaps.setSigAt(rows, 0, num, den)
+                            : TimingMaps.normalizeSig(List.of(List.of(0.0, (double) num, (double) den))));
                 }
                 case "locators" -> applyLocators(Json.list(value));
-                case "tempo_map" -> applyTempoMap(Json.list(value));
-                case "sig_map" -> applySigMap(Json.list(value));
+                case "tempo_map" -> {
+                    List<List<Object>> rows = TimingMaps.normalizeTempo(Json.list(value));
+                    if (!rows.isEmpty()) writeTempo(rows);
+                }
+                case "sig_map" -> {
+                    List<List<Object>> rows = TimingMaps.normalizeSig(Json.list(value));
+                    if (!rows.isEmpty()) writeSig(rows);
+                }
                 case "t" -> {
                     if (parts.length == 2) return applyTrack(parts[1], Json.map(value));
                     TrackOrTrackGroup t = tracks.get(parts[1]);
@@ -830,106 +834,227 @@ final class BitwigModel {
         if (orphans.size() < 20000) orphans.put(key, value);
     }
 
-    private static List<List<Object>> withTempoBaseline(List<List<Object>> map, double bpm) {
-        List<List<Object>> result = new ArrayList<>();
-        boolean found = false;
-        if (map != null)
-            for (List<Object> row : map) {
-                if (row == null || row.size() < 2) continue;
-                double beat = Json.num(row.get(0), 0);
-                if (Math.abs(beat) < 1e-6) {
-                    result.add(List.of(0.0, round(bpm)));
-                    found = true;
-                } else {
-                    result.add(List.of(round(beat), round(Json.num(row.get(1), bpm))));
-                }
-            }
-        if (!found) result.add(List.of(0.0, round(bpm)));
-        result.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
-        return result;
+    // ------------------------------------------------------------ テンポ・拍子・キューマーカー
+
+    private static final long EXPORT_INTERVAL_MS = 2000;
+    private static final long EXPORT_RECHECK_MS = 300;
+    private int exportFailures;
+
+    /** 今のテンポの変化。オートメーションがあれば書き出して読んだもの、無ければテンポの値。 */
+    private List<List<Object>> currentTempoMap() {
+        double knob = round(api.getTransport().getTempo().getValue(Unit.BPM), 3);
+        refreshExport(exportNeeded);
+        if (!exportBroken && exportedTempoPoints == 0 && tempoMapCache != null && tempoMapCache.size() == 1
+                && Math.abs(TimingMaps.tempoAt(tempoMapCache, 0) - knob) > 1e-6
+                && System.currentTimeMillis() - lastExport >= Math.max(EXPORT_RECHECK_MS, exportCost * 4))
+            refreshExport(true);  // 値が変わった。手で変えたのか、オートメーションを書いて再生しているのかを確かめる
+        List<List<Object>> seen;
+        if (exportBroken || exportedTempo == null) {
+            // 書き出せない Bitwig。届いた（書いた）変化があればそれ、無ければテンポの値
+            seen = tempoMapCache != null && tempoMapCache.size() > 1 ? tempoMapCache : List.of(List.of(0.0, knob));
+        } else if (exportedTempoPoints > 0 && !exportedTempo.isEmpty()) {
+            seen = exportedTempo;
+        } else {
+            seen = List.of(List.of(0.0, knob));
+        }
+        // 書き方が違うだけで同じ変化なら、前のもの（届いたもの）をそのまま使う（送り返さないように）
+        if (tempoMapCache == null || !TimingMaps.tempoClose(seen, tempoMapCache, 0.01))
+            tempoMapCache = TimingMaps.normalizeTempo(seen);
+        return tempoMapCache;
     }
 
-    private static List<List<Object>> withSigBaseline(List<List<Object>> map, int num, int den) {
-        List<List<Object>> result = new ArrayList<>();
-        boolean found = false;
-        if (map != null)
-            for (List<Object> row : map) {
-                if (row == null || row.size() < 3) continue;
-                double beat = Json.num(row.get(0), 0);
-                if (Math.abs(beat) < 1e-6) {
-                    result.add(List.of(0.0, (double) num, (double) den));
-                    found = true;
-                } else {
-                    result.add(List.of(round(beat), Json.num(row.get(1), num), Json.num(row.get(2), den)));
-                }
-            }
-        if (!found) result.add(List.of(0.0, (double) num, (double) den));
-        result.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
-        return result;
+    private List<List<Object>> currentSigMap() {
+        var sig = api.getTransport().getTimeSignature();
+        List<List<Object>> plain = List.of(List.of(0.0, (double) sig.getNumerator(), (double) sig.getDenominator()));
+        refreshExport(exportNeeded);
+        if (!exportBroken && exportedSigPoints == 0 && sigMapCache != null && sigMapCache.size() == 1
+                && !Json.same(sigMapCache, TimingMaps.normalizeSig(plain))
+                && System.currentTimeMillis() - lastExport >= Math.max(EXPORT_RECHECK_MS, exportCost * 4))
+            refreshExport(true);
+        List<List<Object>> seen;
+        if (exportBroken || exportedSig == null) seen = sigMapCache != null && sigMapCache.size() > 1 ? sigMapCache : plain;
+        else if (exportedSigPoints > 0 && !exportedSig.isEmpty()) seen = exportedSig;
+        else seen = plain;
+        List<List<Object>> normalized = TimingMaps.normalizeSig(seen);
+        if (sigMapCache == null || !Json.same(normalized, sigMapCache)) sigMapCache = normalized;
+        return sigMapCache;
     }
 
-    /** Replace the arrangement cue-marker list in one undoable operation. */
+    /**
+     * DAWproject に書き出して、アレンジャーのテンポ・拍子のオートメーションを読む（Bitwig の API で読める唯一の方法）。
+     * プロジェクト全体を変換するので、間隔を空ける（重いプロジェクトでは、かかった時間の 40 倍空ける）。
+     * DAWproject のクラスは Bitwig の中にあり、ここからはリフレクションで読む。
+     */
+    private void refreshExport(boolean force) {
+        if (exportBroken) return;
+        long now = System.currentTimeMillis();
+        if (!force && now - lastExport < Math.max(EXPORT_INTERVAL_MS, exportCost * 40)) return;
+        long start = System.nanoTime();
+        try {
+            Object project = api.getClass().getMethod("exportDawProject", Map.class).invoke(api, new HashMap<>());
+            Object arrangement = field(project, "arrangement");
+            Object tempo = arrangement == null ? null : field(arrangement, "tempoAutomation");
+            Object sig = arrangement == null ? null : field(arrangement, "timeSignatureAutomation");
+            List<Object> tempoRows = new ArrayList<>();
+            List<?> tempoPoints = points(tempo);
+            for (Object p : tempoPoints) {
+                Object time = field(p, "time"), value = field(p, "value");
+                if (!(time instanceof Number) || !(value instanceof Number)) continue;
+                Object interpolation = field(p, "interpolation");
+                // 点から次の点までの変わり方。HOLD 以外（LINEAR）は直線
+                boolean linear = interpolation == null || !"HOLD".equals(String.valueOf(interpolation));
+                tempoRows.add(List.of(((Number) time).doubleValue(), ((Number) value).doubleValue(), linear ? 1.0 : 0.0));
+            }
+            List<Object> sigRows = new ArrayList<>();
+            List<?> sigPoints = points(sig);
+            for (Object p : sigPoints) {
+                Object time = field(p, "time"), num = field(p, "numerator"), den = field(p, "denominator");
+                if (time instanceof Number t && num instanceof Number n && den instanceof Number d)
+                    sigRows.add(List.of(t.doubleValue(), n.doubleValue(), d.doubleValue()));
+            }
+            exportedTempo = TimingMaps.normalizeTempo(tempoRows);
+            exportedTempoPoints = tempoPoints.size();
+            exportedSig = TimingMaps.normalizeSig(sigRows);
+            exportedSigPoints = sigPoints.size();
+            exportFailures = 0;
+        } catch (Throwable t) {
+            Throwable cause = t instanceof java.lang.reflect.InvocationTargetException e && e.getCause() != null ? e.getCause() : t;
+            out.log("could not read tempo automation: " + cause);
+            if (++exportFailures >= 3) {
+                exportBroken = true;
+                exportedTempo = null;
+                exportedSig = null;
+                warnOnce("export", "この Bitwig ではテンポのオートメーションを読めないので、Bitwig で書いたテンポの変化は送れません"
+                        + "（届いたテンポの変化は反映します）");
+            }
+        } finally {
+            exportNeeded = false;
+            lastExport = System.currentTimeMillis();
+            exportCost = (System.nanoTime() - start) / 1_000_000;
+        }
+    }
+
+    /** DAWproject の Points の点（拍の位置でないもの・無いものは空）。 */
+    private static List<?> points(Object timeline) throws ReflectiveOperationException {
+        if (timeline == null) return List.of();
+        Object unit = field(timeline, "timeUnit");
+        if (unit != null && "SECONDS".equals(String.valueOf(unit))) return List.of();
+        Object list = field(timeline, "points");
+        return list instanceof List<?> l ? l : List.of();
+    }
+
+    private static Object field(Object target, String name) throws ReflectiveOperationException {
+        return target.getClass().getField(name).get(target);
+    }
+
+    /** テンポの変化を書き込む。オートメーションが無く、変化も無ければ、テンポの値だけ変える。 */
+    private void writeTempo(List<List<Object>> rows) {
+        var tempo = api.getTransport().getTempo();
+        double bpm0 = TimingMaps.tempoAt(rows, 0);
+        if (rows.size() == 1 && exportedTempoPoints == 0) {
+            if (Math.abs(tempo.getValue(Unit.BPM) - bpm0) > 1e-6) tempo.setValue(bpm0, Unit.BPM);
+        } else {
+            // 点と点の間は直線になるので、段差は同じ時刻の 2 点にする。1 点だけだとオートメーションが消えない（値だけ変わる）
+            List<double[]> points = TimingMaps.toLinearPoints(rows);
+            if (points.size() == 1) points.add(points.get(0).clone());
+            AutomationEvents events = factory.createDoubleAutomationEvents(Unit.BPM);
+            for (double[] p : points) events.addPoint(put(p[0]), Math.max(1, p[1]));
+            tempo.setAutomation(events);
+            exportNeeded = true;
+        }
+        tempoMapCache = rows;
+    }
+
+    /** 拍子の変化を書き込む。 */
+    private void writeSig(List<List<Object>> rows) {
+        Transport transport = api.getTransport();
+        var current = transport.getTimeSignature();
+        int tickRate = current.getTickRate();
+        if (rows.size() == 1 && exportedSigPoints == 0) {
+            int[] s = TimingMaps.sigAt(rows, 0);
+            if (current.getNumerator() != s[0] || current.getDenominator() != s[1])
+                transport.setTimeSignature(factory.createTimeSignature(s[0], s[1], tickRate));
+        } else {
+            AutomationEvents events = factory.createTimeSignatureEvents();
+            for (List<Object> row : rows)
+                events.addPoint(put(Json.num(row.get(0), 0)),
+                        factory.createTimeSignature((int) Json.num(row.get(1), 4), (int) Json.num(row.get(2), 4), tickRate));
+            if (rows.size() == 1)  // 1 点だけだとオートメーションが消えないので 2 点
+                events.addPoint(put(Json.num(rows.get(0).get(0), 0)),
+                        factory.createTimeSignature((int) Json.num(rows.get(0).get(1), 4), (int) Json.num(rows.get(0).get(2), 4), tickRate));
+            transport.setTimeSignature(events);
+            exportNeeded = true;
+        }
+        sigMapCache = rows;
+    }
+
+    /**
+     * キューマーカーを合わせる。同じ位置・名前のもの、同じ名前のもの（動かした）、同じ位置のもの（名前を変えた）は、
+     * そのマーカーを直す（作り直すと色が消える）。消すものがあるときは、Bitwig の API では 1 つだけ消せないので、
+     * 全部消して作り直す（色は名前で引き継ぐ）。
+     */
     private void applyLocators(List<Object> raw) {
         if (raw == null) return;
+        List<Object[]> wanted = new ArrayList<>();
+        for (Object item : raw) {
+            List<Object> row = Json.list(item);
+            if (row == null || row.isEmpty() || !(row.get(0) instanceof Number)) continue;
+            wanted.add(new Object[] { Math.max(0, Json.num(row.get(0), 0)), row.size() > 1 && row.get(1) != null ? String.valueOf(row.get(1)) : "" });
+        }
         EventTimeline timeline = api.getCueMarkers();
-        // clearTime removes all events in the interval; use the current last marker rather
-        // than Double.MAX_VALUE because some Bitwig versions clamp timeline ranges.
-        double end = 0;
-        boolean hadMarkers = false;
-        for (Object event : timeline.getEvents())
-            if (event instanceof CueMarker marker) {
-                hadMarkers = true;
-                end = Math.max(end, marker.getTime());
+        List<CueMarker> current = new ArrayList<>();
+        for (Object event : timeline.getEvents()) if (event instanceof CueMarker marker) current.add(marker);
+        Map<Object[], CueMarker> plan = new IdentityHashMap<>();
+        Set<CueMarker> used = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int pass = 0; pass < 3; pass++)
+            for (Object[] w : wanted) {
+                if (plan.containsKey(w)) continue;
+                double beat = (double) w[0];
+                CueMarker best = null;
+                for (CueMarker m : current) {
+                    if (used.contains(m)) continue;
+                    boolean sameTime = Math.abs(m.getTime() - beat) < 1e-4, sameName = w[1].equals(titleOf(m));
+                    if (pass == 0 ? sameTime && sameName : pass == 1 ? sameName : sameTime)
+                        if (best == null || Math.abs(m.getTime() - beat) < Math.abs(best.getTime() - beat)) best = m;
+                }
+                if (best != null) {
+                    plan.put(w, best);
+                    used.add(best);
+                }
             }
-        if (hadMarkers) timeline.clearTime(0, Math.max(1.0, end + 1.0));
-        for (Object item : raw) {
-            List<Object> row = Json.list(item);
-            if (row == null || row.size() < 2) continue;
-            double beat = Math.max(0, Json.num(row.get(0), 0));
-            CueMarker marker = factory.createCueMarker(beat);
-            marker.setTitle(String.valueOf(row.get(1)));
-            timeline.addEvent(marker);
+        if (used.size() < current.size()) {
+            Map<String, Color> colors = new HashMap<>();
+            double end = 0;
+            for (CueMarker m : current) {
+                end = Math.max(end, m.getTime());
+                if (m.getColor() != null) colors.putIfAbsent(titleOf(m), m.getColor());
+            }
+            // clearTime は区間の中を全部消す。Bitwig によっては区間の長さに上限があるので、最後のマーカーまでにする
+            timeline.clearTime(0, Math.max(1.0, end + 1.0));
+            for (Object[] w : wanted) {
+                CueMarker marker = factory.createCueMarker(put((double) w[0]));
+                marker.setTitle((String) w[1]);
+                Color color = colors.get((String) w[1]);
+                if (color != null) marker.setColor(color);
+                timeline.addEvent(marker);
+            }
+            return;
+        }
+        for (Object[] w : wanted) {
+            CueMarker marker = plan.get(w);
+            if (marker == null) {
+                marker = factory.createCueMarker(put((double) w[0]));
+                marker.setTitle((String) w[1]);
+                timeline.addEvent(marker);
+                continue;
+            }
+            if (Math.abs(marker.getTime() - (double) w[0]) >= 1e-6) marker.setTime(put((double) w[0]));
+            if (!w[1].equals(titleOf(marker))) marker.setTitle((String) w[1]);
         }
     }
 
-    /** Write Bitwig's native tempo automation (values are BPM, positions are beats). */
-    private void applyTempoMap(List<Object> raw) {
-        if (raw == null || raw.isEmpty()) return;
-        AutomationEvents events = factory.createDoubleAutomationEvents(Unit.BPM);
-        List<List<Object>> normalized = new ArrayList<>();
-        for (Object item : raw) {
-            List<Object> row = Json.list(item);
-            if (row == null || row.size() < 2) continue;
-            double beat = Math.max(0, Json.num(row.get(0), 0));
-            double bpm = Math.max(1, Json.num(row.get(1), 120));
-            events.addPoint(beat, bpm);
-            normalized.add(List.of(round(beat), round(bpm)));
-        }
-        if (normalized.isEmpty()) return;
-        api.getTransport().getTempo().setAutomation(events);
-        normalized.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
-        tempoMapCache = normalized;
-    }
-
-    /** Write Bitwig's native time-signature automation. */
-    private void applySigMap(List<Object> raw) {
-        if (raw == null || raw.isEmpty()) return;
-        AutomationEvents events = factory.createTimeSignatureEvents();
-        int tickRate = api.getTransport().getTimeSignature().getTickRate();
-        List<List<Object>> normalized = new ArrayList<>();
-        for (Object item : raw) {
-            List<Object> row = Json.list(item);
-            if (row == null || row.size() < 3) continue;
-            double beat = Math.max(0, Json.num(row.get(0), 0));
-            int num = Math.max(1, (int) Json.num(row.get(1), 4));
-            int den = Math.max(1, (int) Json.num(row.get(2), 4));
-            events.addPoint(beat, factory.createTimeSignature(num, den, tickRate));
-            normalized.add(List.of(round(beat), (double) num, (double) den));
-        }
-        if (normalized.isEmpty()) return;
-        api.getTransport().setTimeSignature(events);
-        normalized.sort(Comparator.comparingDouble(v -> Json.num(v.get(0), 0)));
-        sigMapCache = normalized;
+    private static String titleOf(CueMarker marker) {
+        return marker.getTitle() == null ? "" : marker.getTitle();
     }
 
     private void applyOrphans(Set<String> applied, boolean deleted) {

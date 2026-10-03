@@ -10,7 +10,7 @@ namespace DawSync.Core.Sync;
 /// <summary>
 /// 同期の最小単位。「キー」と「値」の組で、同じキーは後から来た値で上書きされる（Last-Writer-Wins）。
 /// 例: ("tempo", 140) / ("sig", [4, 4]) /
-/// ("locators", [[16, "Chorus"]]) / ("tempo_map", [[0, 120], [64, 128]]) /
+/// ("locators", [[16, "Chorus"]]) / ("tempo_map", [[0, 120], [64, 128, 1], [96, 140]])（3 つ目の 1 は次の点まで直線で変わる）/
 /// ("sig_map", [[0, 4, 4], [64, 3, 4]]) /
 /// ("t/3/vol", 0.85) / ("c/s/2/0", {len, n:[[pitch,start,dur,vel,mute],...]})
 /// 値が null のときは削除（クリップの削除など）。

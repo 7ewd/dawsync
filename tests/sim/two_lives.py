@@ -241,87 +241,179 @@ check("ミキサー（音量・パン・センド・マスター・ミュート�
       and B.song.master_track.mixer_device.volume.value != 0.7
       and B.song.tracks[0].mute is False and A.song.tracks[1].solo is False)
 
-# ============================================================== アレンジメントのロケーター／テンポ・拍子マップ
+# ============================================================== アレンジメントのロケーター／テンポ・拍子の変化
+TIMING_KEYS = ("tempo", "sig", "tempo_map", "sig_map")
+
+
+def record_sent(side):
+    """その Live が送った変更のキーを side.sent に残す。"""
+    original = side.script._send_ops
+    side.sent = []
+
+    def wrapped(ops):
+        side.sent.extend(o["k"] for o in ops or [])
+        return original(ops)
+    side.script._send_ops = wrapped
+
+
+def quiet(side, keys, seconds=0.6):
+    """しばらく回して、keys のどれも送らなかったか。"""
+    side.sent = []
+    run_until(lambda: False, timeout=seconds)
+    return not any(k in keys for k in side.sent)
+
+
+record_sent(A)
+record_sent(B)
+
 A.song.current_song_time = 8.0
 A.song.set_or_delete_cue()
 A.song.cue_points[0].name = "Verse"
+A.song.current_song_time = 0.0
 check("ロケーターの位置と名称", lambda: [(c.time, c.name) for c in B.song.cue_points] == [(8.0, "Verse")])
+_cue_a = A.song.cue_points[0]
 B.song.cue_points[0].name = "Verse B"
 check("ロケーター名の変更", lambda: [(c.time, c.name) for c in A.song.cue_points] == [(8.0, "Verse B")])
-A.song.cue_points[0].time = 12.0
+check("名前の変更では、相手のロケーターを作り直さない", lambda: A.song.cue_points[0] is _cue_a)
+A.song.cue_points[0].time = 12.0  # ロケーターをドラッグした（本物の Live では API からは動かせない）
 check("ロケーター位置の変更", lambda: [(c.time, c.name) for c in B.song.cue_points] == [(12.0, "Verse B")])
 A.song.current_song_time = 12.0
 A.song.set_or_delete_cue()
+A.song.current_song_time = 0.0
 check("ロケーターの削除", lambda: len(B.song.cue_points) == 0)
+for beat, name in ((4.0, "Intro"), (16.0, "Chorus")):
+    A.song.current_song_time = beat
+    A.song.set_or_delete_cue()
+    next(c for c in A.song.cue_points if c.time == beat).name = name
+A.song.current_song_time = 0.0
+check("ロケーターを続けて追加", lambda: [(c.time, c.name) for c in B.song.cue_points] == [(4.0, "Intro"), (16.0, "Chorus")])
+next(c for c in A.song.cue_points if c.time == 16.0).name = "Chorus 2"
+check("後から増えたロケーターの名前の変更も届く",
+      lambda: [(c.time, c.name) for c in B.song.cue_points] == [(4.0, "Intro"), (16.0, "Chorus 2")])
 
-# Live の API では非ゼロ位置のテンポ・拍子オートメーションを編集できないため、
-# 基準値を反映し、受け取ったマップの残りは保持する。再生中はランタイム追従も行う。
-B.script._model.apply([{"k": "tempo_map", "v": [[0.0, 100.0], [16.0, 140.0]]}], True, {})
-check("テンポマップの基準値", lambda: B.song.tempo == 100.0
-      and B.script._model.read("tempo_map") == [[0.0, 100.0], [16.0, 140.0]])
-B.script._model.apply([{"k": "sig_map", "v": [[0.0, 3, 4], [16.0, 7, 8]]}], True, {})
-check("拍子マップの基準値", lambda: (B.song.signature_numerator, B.song.signature_denominator) == (3, 4)
-      and B.script._model.read("sig_map") == [[0.0, 3, 4], [16.0, 7, 8]])
-# 受信したマップを停止中のカーソル位置へ一度反映しても、実効値を自分の
-# 変更として再送しない（再送するとルームのマップの拍 0 が壊れる）。
-B.song.current_song_time = 16.0
-B.song.is_playing = False
-_stopped_map_ops = B.script._model.collect_changes()
-check("停止中の受信マップを現在位置へ反映", lambda: B.song.tempo == 140.0
-      and (B.song.signature_numerator, B.song.signature_denominator) == (7, 8))
-check("受信マップを自分の変更として送り返さない",
-      lambda: not any(o["k"] in ("tempo", "sig", "tempo_map", "sig_map") for o in _stopped_map_ops))
-# Keep the normal simulation state intact while probing playback-only behavior.
-# In particular, do not mark every key as sent: doing so would hide the next
-# real edit from the collaboration loop.
-_runtime_probe_state = {
-    "tempo": B.song.tempo,
-    "sig": (B.song.signature_numerator, B.song.signature_denominator),
-    "time": B.song.current_song_time,
-    "playing": B.song.is_playing,
-    "tempo_map": None if B.script._model._runtime_tempo_map is None else [list(r) for r in B.script._model._runtime_tempo_map],
-    "sig_map": None if B.script._model._runtime_sig_map is None else [list(r) for r in B.script._model._runtime_sig_map],
-    "tempo_index": B.script._model._runtime_tempo_index,
-    "sig_index": B.script._model._runtime_sig_index,
-    "last_beat": B.script._model._runtime_last_beat,
-    "dirty": set(B.script._model.dirty),
-    "runtime_dirty": B.script._model._runtime_dirty,
-}
-# The live network may have sent the host's baseline map while the assertions
-# above were waiting. Install the map rows directly for this isolated playback
-# probe; the complete original model state is restored below.
-B.script._model._runtime_tempo_map = [[0.0, 100.0], [16.0, 140.0]]
-B.script._model._runtime_sig_map = [[0.0, 3, 4], [16.0, 7, 8]]
-B.script._model._runtime_tempo_index = 0
-B.script._model._runtime_sig_index = 0
-B.script._model._runtime_last_beat = None
+# 再生中に届いたロケーターは、再生位置を動かさないよう止まってから反映する
 B.song.is_playing = True
-B.song.current_song_time = 16.0
-B.script._model.collect_changes()
-check("再生中のテンポマップ追従", lambda: B.song.tempo == 140.0)
+B.song.current_song_time = 33.0
+run_until(lambda: False, timeout=0.3)
+A.song.current_song_time = 24.0
+A.song.set_or_delete_cue()
+A.song.cue_points[-1].name = "Bridge"
+A.song.current_song_time = 0.0
+run_until(lambda: False, timeout=1.5)
+check("再生中は再生位置を動かさない（ロケーターは止まるまで待つ）",
+      lambda: B.song.current_song_time == 33.0 and len(B.song.cue_points) == 2, timeout=0.5)
+B.sent = []
 B.song.is_playing = False
-B.song.current_song_time = 32.0
-B.script._model.collect_changes()
-check("停止中はテンポマップを上書きしない", lambda: B.song.tempo == 140.0)
+check("止まったらロケーターを反映する（再生位置は元のまま）",
+      lambda: [(c.time, c.name) for c in B.song.cue_points] == [(4.0, "Intro"), (16.0, "Chorus 2"), (24.0, "Bridge")]
+      and B.song.current_song_time == 33.0)
+check("反映したロケーターを送り返さない", lambda: "locators" not in B.sent and quiet(B, ("locators",)), timeout=1.0)
 B.song.current_song_time = 0.0
+
+# --- テンポ・拍子の変化。Live で書いたオートメーションは、保存した .als から読む
+import gzip as _gzip
+
+SIG_3_4, SIG_4_4, SIG_7_8 = 2 + 2 * 99, 3 + 2 * 99, 6 + 3 * 99
+
+
+def save_als(side, tempo_events, sig_events=((-63072000, SIG_4_4),), manual=None):
+    """Live がセットを保存した（.als を書いた）ことにする。"""
+    path = os.path.join(LOGS, "%s.als" % side.name)
+    tempo_xml = "".join('<FloatEvent Id="%d" Time="%s" Value="%s" />' % (n, t, v) for n, (t, v) in enumerate(tempo_events))
+    sig_xml = "".join('<EnumEvent Id="%d" Time="%s" Value="%s" />' % (n, t, v) for n, (t, v) in enumerate(sig_events))
+    manual = tempo_events[0][1] if manual is None else manual
+    xml = ('<?xml version="1.0" encoding="UTF-8"?><Ableton MajorVersion="5" Creator="Ableton Live 12.4.6"><LiveSet>'
+           '<MainTrack><AutomationEnvelopes><Envelopes>'
+           '<AutomationEnvelope Id="0"><EnvelopeTarget><PointeeId Value="10" /></EnvelopeTarget>'
+           '<Automation><Events>%s</Events></Automation></AutomationEnvelope>'
+           '<AutomationEnvelope Id="1"><EnvelopeTarget><PointeeId Value="8" /></EnvelopeTarget>'
+           '<Automation><Events>%s</Events></Automation></AutomationEnvelope>'
+           '</Envelopes></AutomationEnvelopes><DeviceChain><Mixer>'
+           '<Tempo><Manual Value="%s" /><AutomationTarget Id="8" /></Tempo>'
+           '<TimeSignature><Manual Value="201" /><AutomationTarget Id="10" /></TimeSignature>'
+           '</Mixer></DeviceChain></MainTrack></LiveSet></Ableton>') % (sig_xml, tempo_xml, manual)
+    with _gzip.open(path, "wb") as f:
+        f.write(xml.encode("utf-8"))
+    save_als.count = getattr(save_als, "count", 0) + 1
+    stamp = time.time() + save_als.count
+    os.utime(path, (stamp, stamp))
+    side.song.file_path = path
+
+
+def map_of(side, key="tempo_map"):
+    return side.script._model.read(key)
+
+
+A.song.tempo = 100.0
+check("テンポ（オートメーションの無いセット）", lambda: B.song.tempo == 100.0 and map_of(B) == [[0.0, 100.0]])
+
+# Live で「8 拍目で 100 → 120 に跳び、16 拍目までに 140 へ上げる（ランプ）」オートメーションと、
+# 「3/4 で始まり 16 拍目から 7/8」の拍子を書いて保存した。Live は点と点の間を直線で結ぶので、段差は同じ時刻の 2 点
+A_TEMPO_EVENTS = [(-63072000, 100), (8, 100), (8, 120), (16, 140)]
+A_SIG_EVENTS = [(-63072000, SIG_3_4), (16, SIG_7_8)]
+save_als(A, A_TEMPO_EVENTS, A_SIG_EVENTS)
+EXPECTED_TEMPO = [[0.0, 100.0], [8.0, 120.0, 1], [16.0, 140.0]]
+check("保存した .als のテンポ・オートメーション（段差とランプ）が届く", lambda: map_of(B) == EXPECTED_TEMPO)
+check("保存した .als の拍子の変化が届く", lambda: map_of(B, "sig_map") == [[0.0, 3, 4], [16.0, 7, 8]])
+check("届いた変化は、止まっていても今の位置の値にする", lambda: B.song.tempo == 100.0
+      and (B.song.signature_numerator, B.song.signature_denominator) == (3, 4))
+check("拍 0 の値（古いバージョン向け）も届く", lambda: B.script._model.read("tempo") == 100.0
+      and B.script._model.read("sig") == [3, 4])
 B.song.is_playing = True
-B.script._model.collect_changes()
-check("停止後に先頭から再生するとテンポマップを再適用", lambda: B.song.tempo == 100.0)
-B.song.is_playing = True
-B.song.current_song_time = 16.0
-B.script._model.collect_changes()
-check("再生中の拍子マップ追従", lambda: (B.song.signature_numerator, B.song.signature_denominator) == (7, 8))
-B.song.tempo = _runtime_probe_state["tempo"]
-B.song.signature_numerator, B.song.signature_denominator = _runtime_probe_state["sig"]
-B.song.current_song_time = _runtime_probe_state["time"]
-B.song.is_playing = _runtime_probe_state["playing"]
-B.script._model._runtime_tempo_index = _runtime_probe_state["tempo_index"]
-B.script._model._runtime_sig_index = _runtime_probe_state["sig_index"]
-B.script._model._runtime_last_beat = _runtime_probe_state["last_beat"]
-B.script._model._runtime_tempo_map = _runtime_probe_state["tempo_map"]
-B.script._model._runtime_sig_map = _runtime_probe_state["sig_map"]
-B.script._model.dirty = _runtime_probe_state["dirty"]
-B.script._model._runtime_dirty = _runtime_probe_state["runtime_dirty"]
+B.song.current_song_time = 12.0
+check("再生中はランプの途中の BPM に追従する", lambda: abs(B.song.tempo - 130.0) < 1e-6, timeout=1.0)
+B.song.current_song_time = 20.0
+check("再生中は拍子の変化にも追従する", lambda: B.song.tempo == 140.0
+      and (B.song.signature_numerator, B.song.signature_denominator) == (7, 8), timeout=1.0)
+check("追従させた値を、自分の変更として送らない", lambda: quiet(B, TIMING_KEYS), timeout=1.0)
+B.song.current_song_time = 0.0
+check("ループやシークで戻ると、戻った位置の値になる", lambda: B.song.tempo == 100.0
+      and (B.song.signature_numerator, B.song.signature_denominator) == (3, 4), timeout=1.0)
+B.song.is_playing = False
+B.song.current_song_time = 10.0
+check("止まっているときも、再生位置を動かすとその位置の値にする", lambda: abs(B.song.tempo - 125.0) < 1e-6, timeout=1.0)
+check("位置を動かして変わったテンポは送らない", lambda: quiet(B, TIMING_KEYS) and map_of(A) == EXPECTED_TEMPO, timeout=1.0)
+
+# B が保存した（B の .als にはオートメーションが無く、手で入れた値は追従中の値）。ルームのテンポの変化を壊さない
+save_als(B, [(-63072000, 125.0)])
+check("オートメーションの無いセットを保存しても、ルームのテンポの変化を消さない",
+      lambda: quiet(B, TIMING_KEYS) and map_of(A) == EXPECTED_TEMPO and map_of(B) == EXPECTED_TEMPO, timeout=1.5)
+# A がもう一度保存した（オートメーションはそのまま、手で入れた値だけ違う）。前と同じなので送らない
+A.sent = []
+save_als(A, A_TEMPO_EVENTS, A_SIG_EVENTS, manual=133)
+check("オートメーションを変えずに保存しても送らない", lambda: quiet(A, TIMING_KEYS), timeout=1.0)
+
+# 止まっているときに手でテンポを変えたら、再生位置の区間の BPM を変えたことにする
+B.song.current_song_time = 20.0
+run_until(lambda: B.song.tempo == 140.0, timeout=1.0)
+B.song.tempo = 150.0
+EDITED_TEMPO = [[0.0, 100.0], [8.0, 120.0, 1], [16.0, 150.0]]
+check("止まっているときに手で変えたテンポは、その区間の BPM として届く", lambda: map_of(A) == EDITED_TEMPO)
+B.song.current_song_time = 0.0
+
+# Live 自身のテンポのオートメーションが動かしている間の変化は送らない
+A.song.master_track.mixer_device.song_tempo.automation_state = 1
+A.song.is_playing = True
+A.song.tempo = 111.0
+check("Live のオートメーションが動かしているテンポは送らない",
+      lambda: quiet(A, TIMING_KEYS) and map_of(B) == EDITED_TEMPO, timeout=1.0)
+A.song.is_playing = False
+A.song.master_track.mixer_device.song_tempo.automation_state = 0
+A.song.current_song_time = 0.0
+run_until(lambda: False, timeout=0.3)
+
+# A が Live でオートメーションを消して保存した → テンポ・拍子の変化が無くなったことが届く
+save_als(A, [(-63072000, 120.0)], [(-63072000, SIG_3_4)])
+check("Live でオートメーションを消して保存すると、変化が無くなったことが届く",
+      lambda: map_of(B) == [[0.0, 120.0]] and map_of(B, "sig_map") == [[0.0, 3, 4]] and B.song.tempo == 120.0)
+A.song.signature_numerator = 4
+check("拍子（変化の無いセット）", lambda: map_of(B, "sig_map") == [[0.0, 4, 4]]
+      and (B.song.signature_numerator, B.song.signature_denominator) == (4, 4))
+A.song.tempo = 141.0
+check("テンポを手で変えると、拍 0 の値とテンポの変化の両方が届く",
+      lambda: B.song.tempo == 141.0 and map_of(B) == [[0.0, 141.0]] and B.script._model.read("tempo") == 141.0)
+for side in (A, B):
+    side.song.file_path = None
 
 B.song.tracks[2].name = "Drums Bus"
 check("トラック名", lambda: A.song.tracks[2].name == "Drums Bus")

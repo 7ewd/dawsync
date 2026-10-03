@@ -1,6 +1,6 @@
 -- REAPER のプロジェクトを「キー → 値」の集まりとして読み書きする。キーと値の形は Live 用の model.py と同じ。
 --
---   tempo, sig, tempo_map, sig_map, locators
+--   tempo, sig（拍 0 の値）, tempo_map, sig_map（テンポマーカー。形は normalize_tempo_map を参照）, locators（マーカー）
 --   t/<id>                  {"o": 並び順, "k": midi|audio|group, "g": 入っているフォルダ（グループ）の id}
 --   t/<id>/name|color       （ミキサーは各自のものなので同期しない）
 --   c/a/<トラック id>/<開始位置>  アイテム（= アレンジメントのクリップ）{"k", "len", "dur", "n" or "file", "p"}
@@ -100,6 +100,172 @@ local function copy(t)
   for k, v in pairs(t) do c[k] = v end
   if json.is_array(t) then json.array(c) end
   return c
+end
+
+-- ---------------------------------------------------------------- テンポ・拍子
+-- tempo_map の行は [拍, BPM] か [拍, BPM, 1]。3 つ目が 1 の点からは次の点の BPM まで直線で変わる（ランプ）。
+-- 無い・0 なら次の点まで同じ BPM（段差）。同じ拍に 2 点あるときは、前の点がランプの行き先、後の点がその拍からの値。
+-- REAPER の linear なテンポマーカーと同じ考え方。規則は Live の model.py・Bitwig の TimingMaps.java と同じ
+-- （tests/timing で同じ例を確かめる）。
+
+local TEMPO_EPS = 0.002
+
+local function finite(x)
+  return type(x) == "number" and x == x and x ~= math.huge and x ~= -math.huge
+end
+
+local function flag(v)
+  if v == true then return true end
+  if type(v) == "number" then return v ~= 0 end
+  return false
+end
+
+-- 拍で並べる（同じ拍の点は元の順のまま）
+local function sort_by_beat(points)
+  for i, p in ipairs(points) do p.i = i end
+  table.sort(points, function(a, b)
+    if a[1] ~= b[1] then return a[1] < b[1] end
+    return a.i < b.i
+  end)
+end
+
+local function normalize_tempo_map(rows)
+  local points = {}
+  if type(rows) == "table" then
+    for _, row in ipairs(rows) do
+      if type(row) == "table" then
+        local beat, bpm = tonumber(row[1]), tonumber(row[2])
+        if finite(beat) and finite(bpm) and bpm > 0 then
+          points[#points + 1] = { round(math.max(0, beat)), round(bpm, 3), flag(row[3]) }
+        end
+      end
+    end
+  end
+  if #points == 0 then return json.array({}) end
+  sort_by_beat(points)
+  if points[1][1] > 0 then table.insert(points, 1, { 0.0, points[1][2], false }) end
+  local out = {}
+  for n, p in ipairs(points) do
+    local beat, bpm, nxt = p[1], p[2], points[n + 1]
+    local current = { beat, bpm, p[3] and nxt ~= nil and nxt[1] > beat and nxt[2] ~= bpm }
+    local last = out[#out]
+    if last and last[1] == beat then
+      -- 同じ拍の点。直前の点がランプの行き先なら残して跳ぶ。そうでなければ跳ぶ前の値は意味が無いので置き換える
+      local before = out[#out - 1]
+      if before and before[3] and before[1] < beat and last[2] ~= bpm then
+        out[#out + 1] = current
+      else
+        out[#out] = current
+      end
+    elseif not (last and not last[3] and last[2] == bpm and not current[3]) then
+      out[#out + 1] = current
+    end
+  end
+  -- ランプの途中に入った点（拍子だけのマーカーなど）で、前後を結ぶ線の上にあるものは除く
+  local n = 2
+  while n < #out do
+    local a, q, c = out[n - 1], out[n], out[n + 1]
+    if a[3] and q[3] and a[1] < q[1] and q[1] < c[1]
+        and math.abs(a[2] + (c[2] - a[2]) * (q[1] - a[1]) / (c[1] - a[1]) - q[2]) <= TEMPO_EPS then
+      table.remove(out, n)
+    else
+      n = n + 1
+    end
+  end
+  out[#out][3] = false
+  local result = json.array({})
+  for _, p in ipairs(out) do
+    result[#result + 1] = p[3] and json.array({ p[1], p[2], 1 }) or json.array({ p[1], p[2] })
+  end
+  return result
+end
+M.normalize_tempo_map = normalize_tempo_map
+
+-- 拍 beat を含む区間の点の番号（その拍より前の最後の点）
+local function tempo_index(rows, beat)
+  local index = 1
+  for n, row in ipairs(rows) do
+    if row[1] <= beat + 1e-9 then index = n else break end
+  end
+  return index
+end
+
+local function tempo_at(rows, beat)
+  if not rows or #rows == 0 then return nil end
+  local index = tempo_index(rows, beat)
+  local row, nxt = rows[index], rows[index + 1]
+  if row[1] <= beat + 1e-9 and flag(row[3]) and nxt and nxt[1] > row[1] then
+    return row[2] + (nxt[2] - row[2]) * (beat - row[1]) / (nxt[1] - row[1])
+  end
+  return row[2]
+end
+M.tempo_at = tempo_at
+
+-- 拍 beat がランプの途中か
+local function ramp_at(rows, beat)
+  local index = tempo_index(rows, beat)
+  local row, nxt = rows[index], rows[index + 1]
+  return flag(row[3]) and nxt ~= nil and beat < nxt[1]
+end
+
+local function set_tempo_at(rows, beat, bpm)
+  local out = json.array({})
+  for _, row in ipairs(normalize_tempo_map(rows)) do out[#out + 1] = copy(row) end
+  if #out == 0 then return json.array({ json.array({ 0, bpm }) }) end
+  out[tempo_index(out, beat)][2] = bpm
+  return normalize_tempo_map(out)
+end
+M.set_tempo_at = set_tempo_at
+
+local function normalize_sig_map(rows)
+  local points = {}
+  if type(rows) == "table" then
+    for _, row in ipairs(rows) do
+      if type(row) == "table" then
+        local beat, num, den = tonumber(row[1]), tonumber(row[2]), tonumber(row[3])
+        if finite(beat) and finite(num) and finite(den) then
+          num, den = math.floor(num + 0.5), math.floor(den + 0.5)
+          if num >= 1 and den >= 1 then points[#points + 1] = { round(math.max(0, beat)), num, den } end
+        end
+      end
+    end
+  end
+  if #points == 0 then return json.array({}) end
+  sort_by_beat(points)
+  if points[1][1] > 0 then table.insert(points, 1, { 0.0, points[1][2], points[1][3] }) end
+  local same_beat = {}
+  for _, p in ipairs(points) do
+    local last = same_beat[#same_beat]
+    if last and last[1] == p[1] then same_beat[#same_beat] = p else same_beat[#same_beat + 1] = p end
+  end
+  local result = json.array({})
+  for _, p in ipairs(same_beat) do
+    local last = result[#result]
+    if not last or last[2] ~= p[2] or last[3] ~= p[3] then result[#result + 1] = json.array({ p[1], p[2], p[3] }) end
+  end
+  return result
+end
+M.normalize_sig_map = normalize_sig_map
+
+local function sig_at(rows, beat)
+  local num, den
+  for _, row in ipairs(rows or {}) do
+    if num == nil or row[1] <= beat + 1e-9 then num, den = row[2], row[3] else break end
+  end
+  return num, den
+end
+M.sig_at = sig_at
+
+local function set_sig_at(rows, beat, num, den)
+  local out = json.array({})
+  for _, row in ipairs(normalize_sig_map(rows)) do out[#out + 1] = copy(row) end
+  if #out == 0 then return json.array({ json.array({ 0, num, den }) }) end
+  local index = 1
+  for n, row in ipairs(out) do
+    if row[1] <= beat + 1e-9 then index = n end
+  end
+  out[index][2], out[index][3] = num, den
+  return normalize_sig_map(out)
 end
 
 -- ---------------------------------------------------------------- 変わったところ（delta）
@@ -367,14 +533,13 @@ end
 
 function M:read_all()
   local state = {}
-  local tnum, tden, bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)
-  state.tempo = round(bpm, 3)
-  state.sig = json.array({ tnum, tden })
-  -- Arrangement-level timing data.  Positions are represented in quarter notes
-  -- so that a tempo-map edit does not move locators when it is applied.
+  -- アレンジメント全体のテンポ・拍子の変化とロケーター。位置は拍（QN）なので、テンポを変えてもずれない。
+  -- "tempo" / "sig" は拍 0 の値（古い相手との互換）
   state.locators = self:read_locators()
   state.tempo_map = self:read_tempo_map()
   state.sig_map = self:read_sig_map()
+  state.tempo = round(tempo_at(state.tempo_map, 0), 3)
+  state.sig = json.array({ state.sig_map[1][2], state.sig_map[1][3] })
 
   local count = reaper.CountTracks(0)
   local list, tracks = {}, {}
@@ -427,7 +592,7 @@ end
 -- points, and there is no portable region equivalent in the shared protocol).
 function M:read_locators()
   local result = json.array({})
-  local count = reaper.GetNumRegionsOrMarkers(0)
+  local count = (reaper.CountProjectMarkers(0))
   for i = 0, count - 1 do
     local _, isrgn, pos, _, name = reaper.EnumProjectMarkers3(0, i)
     if not isrgn then
@@ -441,57 +606,39 @@ function M:read_locators()
   return result
 end
 
--- Read all effective tempo/time-signature changes.  REAPER stores both values
--- on one tempo marker; the public protocol keeps the two maps separate, so
--- unchanged consecutive values are omitted from each map.
+-- テンポマーカーから、テンポの変化を読む。REAPER は 1 つのマーカーにテンポと拍子の両方を持つが、共通の形では
+-- 別々なので、テンポが変わらないマーカー（拍子だけ）は normalize_tempo_map が除く。
+-- linear なマーカーからは次のマーカーまでテンポが直線で変わる（共通の形の [拍, BPM, 1]）
 function M:read_tempo_map()
-  local result = json.array({})
+  local raw = {}
   local _, _, initial = reaper.TimeMap_GetTimeSigAtTime(0, 0)
-  local previous = round(initial, 3)
-  local count = reaper.CountTempoTimeSigMarkers(0)
-  for i = 0, count - 1 do
-    local ok, timepos, _, _, bpm = reaper.GetTempoTimeSigMarker(0, i)
+  local at_zero = false
+  for i = 0, reaper.CountTempoTimeSigMarkers(0) - 1 do
+    local ok, timepos, _, _, bpm, _, _, linear = reaper.GetTempoTimeSigMarker(0, i)
     if ok then
-      local qn = round(reaper.TimeMap2_timeToQN(0, timepos))
       bpm = tonumber(bpm) or 0
       if bpm <= 0 then bpm = reaper.TimeMap2_GetDividedBpmAtTime(0, timepos) end
-      bpm = round(bpm, 3)
-      if math.abs(previous - bpm) > 1e-6 then
-        result[#result + 1] = json.array({ qn, bpm })
-        previous = bpm
-      end
+      local qn = reaper.TimeMap2_timeToQN(0, timepos)
+      if qn < 1e-6 then at_zero = true end
+      raw[#raw + 1] = { qn, bpm, linear and 1 or 0 }
     end
   end
-  if #result == 0 or tonumber(result[1][1]) > 1e-6 then
-    result[#result + 1] = json.array({ 0, round(initial, 3) })
-    table.sort(result, row_less)
-  end
-  return result
+  -- 最初のマーカーより前は、プロジェクトのテンポのまま
+  if not at_zero then table.insert(raw, 1, { 0, initial, 0 }) end
+  return normalize_tempo_map(raw)
 end
 
 function M:read_sig_map()
-  local result = json.array({})
   local initial_num, initial_den = reaper.TimeMap_GetTimeSigAtTime(0, 0)
-  local previous_num, previous_den = initial_num, initial_den
-  local count = reaper.CountTempoTimeSigMarkers(0)
-  for i = 0, count - 1 do
+  local raw = { { 0, initial_num, initial_den } }
+  for i = 0, reaper.CountTempoTimeSigMarkers(0) - 1 do
     local ok, timepos, _, _, _, num, den = reaper.GetTempoTimeSigMarker(0, i)
-    if ok then
-      local qn = round(reaper.TimeMap2_timeToQN(0, timepos))
-      num, den = math.floor(tonumber(num) or 0), math.floor(tonumber(den) or 0)
-      if num <= 0 then num = previous_num or initial_num end
-      if den <= 0 then den = previous_den or initial_den end
-      if num ~= previous_num or den ~= previous_den then
-        result[#result + 1] = json.array({ qn, num, den })
-        previous_num, previous_den = num, den
-      end
+    -- 拍子を変えないマーカーは 0 を返す
+    if ok and (tonumber(num) or 0) > 0 and (tonumber(den) or 0) > 0 then
+      raw[#raw + 1] = { reaper.TimeMap2_timeToQN(0, timepos), num, den }
     end
   end
-  if #result == 0 or tonumber(result[1][1]) > 1e-6 then
-    result[#result + 1] = json.array({ 0, initial_num, initial_den })
-    table.sort(result, row_less)
-  end
-  return result
+  return normalize_sig_map(raw)
 end
 
 function M:read_items(tid, track, state, kind)
@@ -711,45 +858,6 @@ function M:set_tempo(bpm, num, den)
   reaper.UpdateTimeline()
 end
 
-local function normalize_points(value, width, defaults)
-  local points, by_qn = {}, {}
-  if type(value) == "table" then
-    for _, row in ipairs(value) do
-      if type(row) == "table" then
-        local qn = tonumber(row[1])
-        if qn then
-          qn = round(qn)
-          local p = { qn }
-          for i = 2, width do p[i] = tonumber(row[i]) end
-          by_qn[time_key(qn)] = p
-        end
-      end
-    end
-  end
-  for _, p in pairs(by_qn) do points[#points + 1] = p end
-  for _, p in ipairs(points) do
-    for i = 2, width do
-      if p[i] == nil then p[i] = defaults[i] end
-    end
-  end
-  table.sort(points, row_less)
-  if #points == 0 or math.abs(points[1][1]) > 1e-6 then
-    local p = { 0 }
-    for i = 2, width do p[i] = defaults[i] end
-    points[#points + 1] = p
-    table.sort(points, row_less)
-  end
-  return points
-end
-
-local function map_value(points, qn, fallback, index)
-  local result = fallback
-  for _, p in ipairs(points or {}) do
-    if p[1] <= qn + 1e-7 and p[index] ~= nil then result = p[index] else break end
-  end
-  return result
-end
-
 local function map_positions()
   local items, markers = {}, {}
   for i = 0, reaper.CountMediaItems(0) - 1 do
@@ -758,7 +866,7 @@ local function map_positions()
     local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
     items[#items + 1] = { item, reaper.TimeMap2_timeToQN(0, pos), reaper.TimeMap2_timeToQN(0, pos + len) }
   end
-  local count = reaper.GetNumRegionsOrMarkers(0)
+  local count = (reaper.CountProjectMarkers(0))
   for i = 0, count - 1 do
     local _, isrgn, pos, _, name, id, color = reaper.EnumProjectMarkers3(0, i)
     if not isrgn then
@@ -780,67 +888,123 @@ local function restore_positions(items, markers)
   end
 end
 
--- Replace the tempo/time-signature map while keeping existing item and marker
--- positions in QN.  The shared protocol has separate tempo_map and sig_map;
--- preserve the other map by taking its effective value at every union point.
+-- テンポ・拍子の変化を置き換える（アイテムとマーカーの位置は拍のまま）。共通の形では tempo_map と sig_map が
+-- 別々なので、両方の変わり目にマーカーを置く。拍子を変えないマーカーは拍子を 0（前のまま）にする
+-- （REAPER では拍子を持つマーカーから小節が始まり直すので、テンポだけの変化に拍子を付けると小節がずれる）。
 function M:set_tempo_map(value, sig_value)
-  local old_tempo = self:read_tempo_map()
-  local old_sig = self:read_sig_map()
-  local tempo = normalize_points(value, 2, { [2] = map_value(old_tempo, 0, 120, 2) })
-  local sig = normalize_points(sig_value or old_sig, 3, {
-    [2] = map_value(old_sig, 0, 4, 2), [3] = map_value(old_sig, 0, 4, 3)
-  })
-  local qns = {}
-  for _, p in ipairs(tempo) do qns[time_key(p[1])] = p[1] end
-  for _, p in ipairs(sig) do qns[time_key(p[1])] = p[1] end
-  local union = {}
-  for _, qn in pairs(qns) do union[#union + 1] = qn end
-  table.sort(union)
+  local tempo = normalize_tempo_map(value)
+  if #tempo == 0 then tempo = self:read_tempo_map() end
+  local sig = normalize_sig_map(sig_value or self:read_sig_map())
+  if #sig == 0 then sig = json.array({ json.array({ 0, 4, 4 }) }) end
+
+  -- 置くマーカー { qn, bpm, linear, num, den }
+  local marks = {}
+  for n, p in ipairs(tempo) do
+    local qn, nxt = p[1], tempo[n + 1]
+    if nxt and nxt[1] == qn then
+      -- ランプの行き先で、同じ拍で跳ぶ。REAPER は同じ位置に 2 つ置けないので、行き先は 1 tick（1/960 拍）手前にする
+      local prev = marks[#marks]
+      qn = math.max(qn - 1 / 960, (prev and prev.qn or 0) + (qn - (prev and prev.qn or 0)) / 2)
+    end
+    marks[#marks + 1] = { qn = qn, bpm = p[2], linear = flag(p[3]) }
+  end
+  for _, s in ipairs(sig) do
+    local mark
+    for _, m in ipairs(marks) do
+      if math.abs(m.qn - s[1]) < 1e-6 then mark = m end
+    end
+    if not mark then
+      -- 拍子だけ変わる位置。テンポはその位置の値で、ランプの途中ならランプを続ける
+      mark = { qn = s[1], bpm = tempo_at(tempo, s[1]), linear = ramp_at(tempo, s[1]) }
+      marks[#marks + 1] = mark
+    end
+    mark.num, mark.den = s[2], s[3]
+  end
+  table.sort(marks, function(a, b) return a.qn < b.qn end)
 
   local items, markers = map_positions()
-  local bpm0 = map_value(tempo, 0, 120, 2)
-  local num0 = math.floor(map_value(sig, 0, 4, 2))
-  local den0 = math.floor(map_value(sig, 0, 4, 3))
   local count = reaper.CountTempoTimeSigMarkers(0)
-  if count == 0 then
-    reaper.SetTempoTimeSigMarker(0, -1, 0, -1, -1, bpm0, num0, den0, false)
-  else
-    reaper.SetTempoTimeSigMarker(0, 0, 0, -1, -1, bpm0, num0, den0, false)
-    for i = count - 1, 1, -1 do reaper.DeleteTempoTimeSigMarker(0, i) end
-  end
-  for _, qn in ipairs(union) do
-    if qn > 1e-6 then
-      local bpm = map_value(tempo, qn, bpm0, 2)
-      local num = math.floor(map_value(sig, qn, num0, 2))
-      local den = math.floor(map_value(sig, qn, den0, 3))
-      local at = reaper.TimeMap2_QNToTime(0, qn)
-      reaper.SetTempoTimeSigMarker(0, -1, at, -1, -1, bpm, num, den, false)
-    end
+  for i = count - 1, 1, -1 do reaper.DeleteTempoTimeSigMarker(0, i) end
+  local first = marks[1]
+  reaper.SetTempoTimeSigMarker(0, count > 0 and 0 or -1, 0, -1, -1, first.bpm, first.num or sig[1][2], first.den or sig[1][3], first.linear)
+  local previous = 0
+  for n = 2, #marks do
+    previous = self:place_tempo_marker(n - 1, marks[n], previous)
   end
   restore_positions(items, markers)
   reaper.UpdateTimeline()
 end
 
+-- index 番目（0 から）に、拍 m.qn のテンポマーカーを足す。マーカーは秒の位置で置くが、前のマーカーが linear だと
+-- ランプの長さ（= このマーカーの位置）で拍が変わるので、拍が合うまで位置を直す（後ろのマーカーはまだ無いので、
+-- 前から順に置けば前のマーカーには影響しない）。置いた秒の位置を返す
+function M:place_tempo_marker(index, m, previous)
+  local function set(at)
+    at = math.max(at, previous + 1e-9)
+    reaper.SetTempoTimeSigMarker(0, index < reaper.CountTempoTimeSigMarkers(0) and index or -1, at, -1, -1,
+      m.bpm, m.num or 0, m.den or 0, m.linear)
+    return at, reaper.TimeMap2_timeToQN(0, at)
+  end
+  local t0, q0 = set(reaper.TimeMap2_QNToTime(0, m.qn))
+  if math.abs(q0 - m.qn) < 1e-9 then return t0 end
+  local t1, q1 = set(t0 + (m.qn - q0) * 60 / math.max(1, m.bpm))
+  for _ = 1, 30 do
+    if math.abs(q1 - m.qn) < 1e-9 or q1 == q0 then break end
+    local t2 = t1 + (m.qn - q1) * (t1 - t0) / (q1 - q0)
+    t0, q0 = t1, q1
+    t1, q1 = set(t2)
+  end
+  return t1
+end
+
 function M:set_sig_map(value)
-  -- Rebuilding through set_tempo_map preserves the existing tempo points.
+  -- 今のテンポの変化はそのまま、拍子だけ置き換える
   self:set_tempo_map(self:read_tempo_map(), value)
 end
 
+-- ロケーター（リージョンではないマーカー）を合わせる。同じ位置・名前のもの、同じ名前のもの（動かした）、
+-- 同じ位置のもの（名前を変えた）はそのマーカーを直す（消して作り直すと、番号や色が変わってしまう）
 function M:set_locators(value)
   if type(value) ~= "table" then return end
-  local old = {}
-  local count = reaper.GetNumRegionsOrMarkers(0)
-  for i = count - 1, 0, -1 do
-    local _, isrgn, _, _, _, id = reaper.EnumProjectMarkers3(0, i)
-    if not isrgn then old[#old + 1] = id end
-  end
-  for _, id in ipairs(old) do reaper.DeleteProjectMarker(0, id, false) end
+  local wanted = {}
   for _, row in ipairs(value) do
-    if type(row) == "table" and tonumber(row[1]) then
-      local qn = tonumber(row[1])
-      local name = type(row[2]) == "string" and row[2] or ""
-      local at = reaper.TimeMap2_QNToTime(0, qn)
-      reaper.AddProjectMarker2(0, false, at, at, name, -1, 0)
+    if type(row) == "table" and finite(tonumber(row[1])) then
+      wanted[#wanted + 1] = { qn = math.max(0, tonumber(row[1])), name = type(row[2]) == "string" and row[2] or "" }
+    end
+  end
+  local current = {}
+  for i = 0, (reaper.CountProjectMarkers(0)) - 1 do
+    local _, isrgn, pos, _, name, id, color = reaper.EnumProjectMarkers3(0, i)
+    if not isrgn then
+      current[#current + 1] = { id = id, qn = reaper.TimeMap2_timeToQN(0, pos), name = name or "", color = color or 0 }
+    end
+  end
+  local used, plan = {}, {}
+  local function take(w, test)
+    if plan[w] then return end
+    local best, best_d
+    for n, c in ipairs(current) do
+      if not used[n] and test(c) then
+        local d = math.abs(c.qn - w.qn)
+        if not best or d < best_d then best, best_d = n, d end
+      end
+    end
+    if best then used[best], plan[w] = true, current[best] end
+  end
+  for _, w in ipairs(wanted) do take(w, function(c) return math.abs(c.qn - w.qn) < 1e-4 and c.name == w.name end) end
+  for _, w in ipairs(wanted) do take(w, function(c) return c.name == w.name end) end
+  for _, w in ipairs(wanted) do take(w, function(c) return math.abs(c.qn - w.qn) < 1e-4 end) end
+  for n, c in ipairs(current) do
+    if not used[n] then reaper.DeleteProjectMarker(0, c.id, false) end
+  end
+  for _, w in ipairs(wanted) do
+    local c = plan[w]
+    local at = reaper.TimeMap2_QNToTime(0, w.qn)
+    if not c then
+      reaper.AddProjectMarker2(0, false, at, at, w.name, -1, 0)
+    elseif math.abs(c.qn - w.qn) >= 1e-6 or c.name ~= w.name then
+      -- 名前を空にするときは flags の 1（空の名前を渡すだけだと、REAPER は名前を変えない）
+      reaper.SetProjectMarker4(0, c.id, false, at, at, w.name, c.color, w.name == "" and 1 or 0)
     end
   end
   reaper.UpdateTimeline()
@@ -906,6 +1070,7 @@ function M:apply(raw_ops, force, pending)
   local applied = {}
   local structure = false
   self:find_moves(ops)
+  self.batch = batch
   for _, o in ipairs(ops) do
     local ok, err = pcall(function()
       if self:apply_one(o.k, o.v) then applied[o.k] = true end
@@ -913,6 +1078,7 @@ function M:apply(raw_ops, force, pending)
     if not ok then self.log("failed to apply " .. o.k .. ": " .. tostring(err)) end
     if priority(o.k) == 0 then structure = true end
   end
+  self.batch = nil
   if structure then self:layout() end
   self:apply_orphans(applied)
   self:restore_selection(selected)
@@ -947,13 +1113,16 @@ function M:apply_one(key, value)
     if value ~= nil then self:set_sig_map(value) end
     return true
   elseif key == "tempo" then
-    local num, den = reaper.TimeMap_GetTimeSigAtTime(0, 0)
-    self:set_tempo_keeping_items(value or 120, num, den)
+    -- 拍 0 のテンポ（古い相手との互換）。同じまとまりに tempo_map があれば、そちらの方が詳しい
+    if (self.batch or {})["tempo_map"] then return true end
+    local bpm = tonumber(value)
+    if not finite(bpm) or bpm <= 0 then return false end
+    self:set_tempo_map(set_tempo_at(self:read_tempo_map(), 0, bpm))
     return true
   elseif key == "sig" then
-    if type(value) ~= "table" then return false end
-    local _, _, bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)
-    self:set_tempo_keeping_items(bpm, math.floor(value[1]), math.floor(value[2]))
+    if (self.batch or {})["sig_map"] then return true end
+    if type(value) ~= "table" or not tonumber(value[1]) or not tonumber(value[2]) then return false end
+    self:set_sig_map(set_sig_at(self:read_sig_map(), 0, math.floor(value[1]), math.floor(value[2])))
     return true
   elseif p[1] == "t" then
     if #p == 2 then return self:apply_track(p[2], value) end
@@ -995,13 +1164,6 @@ function M:apply_orphans(applied)
     self.orphans[key] = nil
     if self:apply_one(key, value) then applied[key] = true end
   end
-end
-
--- テンポを変えても、アイテムの位置・長さは拍のまま（Live と同じ）にする
-function M:set_tempo_keeping_items(bpm, num, den)
-  local items, markers = map_positions()
-  self:set_tempo(bpm, num, den)
-  restore_positions(items, markers)
 end
 
 -- ---------------------------------------------------------------- tracks

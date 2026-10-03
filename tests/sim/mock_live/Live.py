@@ -45,6 +45,7 @@ class DeviceParameter(Listenable):
         self.min = min
         self.max = max
         self.value = value
+        self.automation_state = 0  # AutomationState: 0 無い / 1 再生中 / 2 手で上書き
 
 
 class MixerDevice:
@@ -445,6 +446,8 @@ class Song(Listenable):
         self.return_tracks = []
         self.scenes = [Scene() for _ in range(scenes)]
         self.master_track = Track("Master", midi=False, slots=0, sends=0)
+        self.master_track.mixer_device.song_tempo = DeviceParameter("Song Tempo", 120.0, 20.0, 999.0)
+        self.file_path = None  # 保存した .als の場所（保存していなければ None）
         self.view = SongView()
 
     def set_or_delete_cue(self):

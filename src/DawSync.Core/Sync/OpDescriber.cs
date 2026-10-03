@@ -21,10 +21,13 @@ public static class OpDescriber
             .Where(o => o.Key.Split('/') is ["t" or "r" or "s", _] && (o.Value is null || !state.ContainsKey(o.Key)))
             .Select(o => o.Key)
             .ToHashSet();
+        // tempo / sig（拍 0 の値）は tempo_map / sig_map と一緒に届くので、そちらの 1 行にまとめる
+        var keys = ops.Select(o => o.Key).ToHashSet();
         foreach (var op in ops)
         {
             var p = op.Key.Split('/');
             if (p.Length > 2 && whole.Contains($"{p[0]}/{p[1]}")) continue;
+            if ((op.Key == "tempo" && keys.Contains("tempo_map")) || (op.Key == "sig" && keys.Contains("sig_map"))) continue;
             var view = state;
             if (op.Value is not null && whole.Contains(op.Key)
                 && ops.LastOrDefault(o => o.Key == op.Key + "/name")?.Value is { } name)
@@ -46,9 +49,13 @@ public static class OpDescriber
             {
                 ["tempo"] => $"テンポを {Num(v):0.##} BPM に変更",
                 ["sig"] => $"拍子を {(int?)v?[0]}/{(int?)v?[1]} に変更",
-                ["locators"] => "ロケーターを更新",
-                ["tempo_map"] => "BPM の変動を更新",
-                ["sig_map"] => "拍子変更を更新",
+                ["locators"] => DescribeLocators(state, v),
+                ["tempo_map"] => v is JsonArray { Count: > 1 } tempo
+                    ? $"テンポの変化を更新（{tempo.Count - 1} か所）"
+                    : $"テンポを {Num(v?[0]?[1]):0.##} BPM に変更",
+                ["sig_map"] => v is JsonArray { Count: > 1 } sig
+                    ? $"拍子の変化を更新（{sig.Count - 1} か所）"
+                    : $"拍子を {(int?)Num(v?[0]?[1])}/{(int?)Num(v?[0]?[2])} に変更",
 
                 ["t", var id] => v is null ? $"トラック{Name(state, "t", id)}を削除"
                     : !existed ? $"{KindName((string?)v["k"])}トラック{Name(state, "t", id)}を追加"
@@ -202,12 +209,56 @@ public static class OpDescriber
         _ => "?",
     };
 
-    private static int Bar(string startBeats, IReadOnlyDictionary<string, JsonNode?> state)
+    private static int Bar(string startBeats, IReadOnlyDictionary<string, JsonNode?> state) =>
+        BarAt(double.Parse(startBeats, CultureInfo.InvariantCulture), state);
+
+    /// <summary>拍 beats が何小節目か（拍子の変化 sig_map も数える）</summary>
+    private static int BarAt(double beats, IReadOnlyDictionary<string, JsonNode?> state)
     {
-        var sig = state.GetValueOrDefault("sig");
-        var num = (int?)sig?[0] ?? 4;
-        var den = (int?)sig?[1] ?? 4;
-        return (int)(double.Parse(startBeats, CultureInfo.InvariantCulture) / (num * 4.0 / den)) + 1;
+        var rows = (state.GetValueOrDefault("sig_map") as JsonArray)?
+            .Select(r => (Beat: Num(r?[0]), Num: (int)Num(r?[1]), Den: (int)Num(r?[2])))
+            .Where(r => r.Num > 0 && r.Den > 0)
+            .OrderBy(r => r.Beat)
+            .ToList() ?? [];
+        if (rows.Count == 0 || rows[0].Beat > 0)
+        {
+            var sig = state.GetValueOrDefault("sig");
+            rows.Insert(0, (0, (int?)sig?[0] ?? 4, (int?)sig?[1] ?? 4));
+        }
+        // 拍子が変わる所から、新しい拍子の小節を数え始める（途中で終わった小節も 1 小節）
+        double bars = 0;
+        for (var n = 0; n < rows.Count; n++)
+        {
+            var length = rows[n].Num * 4.0 / rows[n].Den;
+            var next = n + 1 < rows.Count ? rows[n + 1].Beat : double.MaxValue;
+            if (beats < next) return (int)(bars + Math.Floor((beats - rows[n].Beat) / length + 1e-9)) + 1;
+            bars += Math.Ceiling((next - rows[n].Beat) / length - 1e-9);
+        }
+        return (int)bars + 1;
+    }
+
+    /// <summary>ロケーターの変化（追加・削除・名前の変更・移動）</summary>
+    private static string DescribeLocators(IReadOnlyDictionary<string, JsonNode?> state, JsonNode? value)
+    {
+        static List<(double Beat, string Name)> Rows(JsonNode? v) =>
+            (v as JsonArray)?.Select(r => (Math.Round(Num(r?[0]), 4), (string?)(r?[1] as JsonValue) ?? "")).ToList() ?? [];
+        var before = Rows(state.GetValueOrDefault("locators"));
+        var after = Rows(value);
+        var added = after.Where(r => !before.Contains(r)).ToList();
+        var removed = before.Where(r => !after.Contains(r)).ToList();
+        string Label((double Beat, string Name) r) =>
+            r.Name.Length > 0 ? $"「{r.Name}」" : $"（{BarAt(r.Beat, state)} 小節目）";
+        return (added.Count, removed.Count) switch
+        {
+            (1, 1) when added[0].Name == removed[0].Name => $"ロケーター{Label(added[0])}を {BarAt(added[0].Beat, state)} 小節目に移動",
+            (1, 1) when added[0].Beat == removed[0].Beat => added[0].Name.Length == 0
+                ? $"ロケーター{Label(removed[0])}の名前を消去"
+                : $"ロケーター{Label(removed[0])}の名前を「{added[0].Name}」に変更",
+            (1, 0) => $"ロケーター{Label(added[0])}を {BarAt(added[0].Beat, state)} 小節目に追加",
+            (0, 1) => $"ロケーター{Label(removed[0])}を削除",
+            _ when after.Count == 0 && before.Count > 0 => "ロケーターをすべて削除",
+            _ => $"ロケーターを更新（{after.Count} 個）",
+        };
     }
 
     private static string Pan(double v) => Math.Abs(v) < 0.01 ? "センター" : v < 0 ? $"{-v * 50:0}L" : $"{v * 50:0}R";
