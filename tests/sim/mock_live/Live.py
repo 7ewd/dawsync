@@ -437,7 +437,9 @@ class Song(Listenable):
         self.tempo = 120.0
         self.signature_numerator = 4
         self.signature_denominator = 4
-        self.current_song_time = 0.0
+        self._song_time = 0.0
+        self._pending_time = None
+        self._in_script = False
         # Real Live exposes this transport state and the Remote Script uses it
         # to apply received tempo/signature map rows only during playback.
         self.is_playing = False
@@ -450,17 +452,43 @@ class Song(Listenable):
         self.file_path = None  # 保存した .als の場所（保存していなければ None）
         self.view = SongView()
 
+    # 本物の Live では、スクリプトが current_song_time を変えても、読める（ロケーターを置ける）のは次の tick から。
+    # テストのコード（人の操作のつもり）から変えたときはすぐ変わる
+    @property
+    def current_song_time(self):
+        return self._song_time
+
+    @current_song_time.setter
+    def current_song_time(self, value):
+        if self._in_script:
+            self._pending_time = float(value)
+        else:
+            self._song_time = float(value)
+
+    def _begin_tick(self):
+        if self._pending_time is not None:
+            self._song_time, self._pending_time = self._pending_time, None
+        self._in_script = True
+
+    def _end_tick(self):
+        self._in_script = False
+
+    # 本物の Live は、ロケーターを作るときアレンジメントのグリッドに吸い付ける（吸い付いた先にあれば消す）
+    cue_grid = 0.25
+
     def set_or_delete_cue(self):
         """Mirror Live's toggle at the current Arrangement playback position."""
         at = float(self.current_song_time)
         cues = list(self.cue_points)
         hit = next((c for c in cues if abs(c.time - at) < 1e-4), None)
+        if hit is None and self.cue_grid:
+            at = round(at / self.cue_grid) * self.cue_grid
+            hit = next((c for c in cues if abs(c.time - at) < 1e-4), None)
         if hit is None:
-            cues.append(CuePoint(at))
-            cues.sort(key=lambda c: c.time)
+            cues.append(CuePoint(at, str(len(cues) + 1)))  # 本物の Live と同じく、作った順の番号の名前
         else:
             cues.remove(hit)
-        self.cue_points = cues
+        self.cue_points = cues  # 本物の Live と同じく、位置の順には並べない
 
     def _slots(self):
         return len(self.scenes)

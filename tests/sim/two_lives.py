@@ -68,7 +68,11 @@ class Side:
     def tick(self):
         if self.script is not None:
             Live.Application.current = self.app
-            self.script.update_display()
+            self.song._begin_tick()
+            try:
+                self.script.update_display()
+            finally:
+                self.song._end_tick()
 
 
 def make_song():
@@ -256,6 +260,10 @@ def record_sent(side):
     side.script._send_ops = wrapped
 
 
+def model_locators(side):
+    return side.script._model._read_locators(side.song)
+
+
 def quiet(side, keys, seconds=0.6):
     """しばらく回して、keys のどれも送らなかったか。"""
     side.sent = []
@@ -309,6 +317,36 @@ check("止まったらロケーターを反映する（再生位置は元のま�
       and B.song.current_song_time == 33.0)
 check("反映したロケーターを送り返さない", lambda: "locators" not in B.sent and quiet(B, ("locators",)), timeout=1.0)
 B.song.current_song_time = 0.0
+
+# Live はロケーターをグリッドに吸い付けて作る。3 連符の位置のものは吸い付いた位置に置き、届いた位置として扱う
+B.song.cue_grid = 0.0  # B はグリッドを切って置いた
+B.song.current_song_time = 10.0 + 2.0 / 3.0
+B.song.set_or_delete_cue()
+next(c for c in B.song.cue_points if abs(c.time - (10.0 + 2.0 / 3.0)) < 1e-6).name = "Triplet"
+B.song.current_song_time = 0.0
+B.song.cue_grid = 0.25
+A.sent = []
+check("グリッドの外のロケーターも、相手の Live では届いた位置として扱う",
+      lambda: model_locators(A) == model_locators(B) and [10.75, "Triplet"] not in model_locators(A)
+      and any(abs(c.time - 10.75) < 1e-6 and c.name == "Triplet" for c in A.song.cue_points))
+check("吸い付いた位置を送り返さない", lambda: "locators" not in A.sent and quiet(A, ("locators",)), timeout=1.0)
+# 吸い付いた先にロケーターがあるときは、それを消さない
+B.song.cue_grid = 0.0
+B.song.current_song_time = 4.05
+B.song.set_or_delete_cue()
+next(c for c in B.song.cue_points if abs(c.time - 4.05) < 1e-6).name = "Near"
+B.song.current_song_time = 0.0
+B.song.cue_grid = 0.25
+run_until(lambda: False, timeout=1.5)
+check("近すぎて置けないロケーターがあっても、相手のロケーターを消さない",
+      lambda: (4.0, "Intro") in [(c.time, c.name) for c in A.song.cue_points]
+      and len(A.song.cue_points) == len(B.song.cue_points) - 1)
+B.song.cue_grid = 0.0
+B.song.current_song_time = 4.05
+B.song.set_or_delete_cue()
+B.song.current_song_time = 0.0
+B.song.cue_grid = 0.25
+check("あとで消したら揃う", lambda: model_locators(A) == model_locators(B))
 
 # --- テンポ・拍子の変化。Live で書いたオートメーションは、保存した .als から読む
 import gzip as _gzip

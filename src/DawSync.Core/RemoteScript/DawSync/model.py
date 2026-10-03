@@ -290,6 +290,9 @@ def set_sig_at(rows, beat, num, den):
     return normalize_sig_map(rows)
 
 
+LOCATOR_EPS = 1e-4  # 同じ位置のロケーターとみなす差（拍）
+
+
 def normalize_locators(rows):
     """ロケーター [[拍, 名前], ...] を拍・名前の順に並べる。"""
     result = []
@@ -525,8 +528,17 @@ class Model(object):
 
     def _reset_timing(self):
         self._last_locators = None
-        # 再生中に届いたロケーター（Live は再生位置を動かさないとロケーターを作れないので、止まってから反映する）
+        # 相手から届いて、まだ置き終わっていないロケーター。Live はロケーターを「再生位置でのトグル」でしか作れず、
+        # 再生位置を変えても反映されるのは次の tick なので、1 つずつ tick をまたいで置く（_step_locators）
         self._pending_locators = None
+        self._locator_restore = None  # 置き始める前の再生位置（置き終わったら戻す）
+        self._locator_moved_to = None  # 置くために動かした先の再生位置（違う場所にあれば、人が動かした）
+        self._locator_base = None      # 最後に見た／置いた後の Live のロケーター（これと違えば、人が編集した）
+        self._locator_skip = set()     # 置けなかった位置（今回は置き直さない）
+        self._locator_keep = set()     # 消せなかったロケーター（今回は消し直さない）
+        self._locator_alias = {}       # グリッドに吸い付いて置いたロケーター: ptr -> (Live での位置, 届いた位置)
+        self._locator_steps = 0
+        self._step_errors = set()
         self._cues_changed = False
         # このセットのテンポ・拍子の変化（ルームと同じもの）。Live の API ではアレンジメントのオートメーションを
         # 書き込めないので、ほかの DAW から届いたものはここに持っておき、再生中に song.tempo などを追従させる。
@@ -880,19 +892,37 @@ class Model(object):
         return changed
 
     # ------------------------------------------------------------ ロケーター
+    #
+    # Live の API では、ロケーターは set_or_delete_cue（再生位置にロケーターがあれば消す、無ければ作る）でしか
+    # 作れず、位置も変えられない（time は読み取りのみ）。しかも
+    #   - current_song_time を変えても、読める（トグルに使われる）のは次の tick から
+    #   - 作るときはアレンジメントのグリッドに吸い付く（3 連符の位置などに置くと、近くのグリッドに置かれる）。
+    #     吸い付いた先にロケーターがあると、作らずにそれを消す
+    # なので、届いたロケーターは tick ごとに 1 つずつ置き（_step_locators）、グリッドに吸い付いたものは
+    # 「本当はこの位置のもの」として覚えて、その位置として読む（_locator_alias）。
 
-    @staticmethod
-    def _read_locators(song):
+    def _cue_time(self, cue):
+        """ロケーターの位置（拍）。グリッドに吸い付いて置いたものは、届いた位置として読む。"""
+        t = float(cue.time)
+        alias = self._locator_alias.get(_ptr(cue))
+        if alias is not None and abs(t - alias[0]) < LOCATOR_EPS:
+            return alias[1]
+        return t
+
+    def _cues(self, song):
+        return list(getattr(song, "cue_points", ()) or ())
+
+    def _read_locators(self, song):
         result = []
-        for cue in list(getattr(song, "cue_points", ()) or ()):
+        for cue in self._cues(song):
             try:
-                result.append([_round(cue.time), str(getattr(cue, "name", ""))])
+                result.append([_round(self._cue_time(cue)), str(getattr(cue, "name", ""))])
             except Exception:
                 continue
         return sorted(result, key=lambda x: (x[0], x[1]))
 
     def _read_locators_value(self, song):
-        # 再生中に届いてまだ反映していないものは、反映したことにして読む（古い今の状態を「変更」として送らないように）
+        # 届いてまだ置き終わっていないものは、置いたことにして読む（古い今の状態を「変更」として送らないように）
         if self._pending_locators is not None:
             return [list(r) for r in self._pending_locators]
         return self._read_locators(song)
@@ -910,85 +940,163 @@ class Model(object):
                 pass
         self._cue_removers = []
         self._cues_changed = False
-        for cue in list(getattr(song, "cue_points", ()) or ()):
+        alive = set()
+        for cue in self._cues(song):
+            alive.add(_ptr(cue))
             self._listen(cue, "name", self._mark("locators"), self._cue_removers)
             self._listen(cue, "time", self._mark("locators"), self._cue_removers)
+        for ptr in list(self._locator_alias):
+            if ptr not in alive:
+                del self._locator_alias[ptr]
 
     def _write_locators(self, song, value):
         wanted = []
         for beat, name in normalize_locators(value):
             # Live では同じ位置に 2 つ置けない（同じ位置でもう一度トグルすると消える）。最初のものを使う
-            if not wanted or wanted[-1][0] != beat:
+            if not wanted or abs(wanted[-1][0] - beat) >= LOCATOR_EPS:
                 wanted.append([beat, name])
-        if getattr(song, "is_playing", False):
-            # 再生中に再生位置を動かすと、再生している人の音が飛ぶ。止まってから反映する
-            self._pending_locators = wanted
-            return
-        self._pending_locators = None
-        self._apply_locators_now(song, wanted)
+        # 実際に置くのは tick ごと（_step_locators）。置き終わるまでは、届いた値を今の値として読む
+        self._pending_locators = wanted
+        self._locator_steps = 0
+        self._locator_skip = set()
+        self._locator_keep = set()
+        self._rename_locators(song, wanted)
+        self._locator_base = self._read_locators(song)
 
-    def _apply_locators_now(self, song, wanted):
+    def _plan_locators(self, song, wanted):
+        """今のロケーターと届いたものを比べ、（名前を変えるもの, 消すもの, 足すもの）を返す。"""
         current = []
-        for cue in list(getattr(song, "cue_points", ()) or ()):
+        for cue in self._cues(song):
             try:
-                current.append((cue, _round(cue.time), str(getattr(cue, "name", ""))))
+                current.append((cue, self._cue_time(cue), str(getattr(cue, "name", ""))))
             except Exception:
                 pass
-        # 同じ位置・名前のもの、次に同じ位置のもの（名前だけ変わった）を残す。消して作り直さないので、
-        # Live の中のロケーターはそのまま（選択なども外れない）
+        # 同じ位置・名前のもの、次に同じ位置のもの（名前だけ変わった）はそのまま使う
+        # （消して作り直さないので、Live の中のロケーターはそのまま。選択なども外れない）
         used = set()
-        matched = []
-        for beat, name in wanted:
-            hit = next((n for n, x in enumerate(current) if n not in used and x[1] == beat and x[2] == name), None)
-            if hit is None:
-                hit = next((n for n, x in enumerate(current) if n not in used and x[1] == beat), None)
-            if hit is not None:
-                used.add(hit)
-            matched.append((beat, name, hit))
-        old_time = getattr(song, "current_song_time", None)
-        try:
-            for n, (cue, beat, name) in enumerate(current):
-                if n not in used:
-                    song.current_song_time = beat
-                    song.set_or_delete_cue()
-            for beat, name, hit in matched:
-                cue = current[hit][0] if hit is not None else None
-                if cue is None:
-                    song.current_song_time = beat
-                    song.set_or_delete_cue()
-                    cue = next((x for x in list(getattr(song, "cue_points", ()) or ())
-                                if abs(float(x.time) - beat) < 1e-4), None)
-                if cue is not None and str(getattr(cue, "name", "")) != name:
-                    cue.name = name
-        finally:
-            if old_time is not None:
-                try:
-                    song.current_song_time = old_time
-                except Exception:
-                    pass
-        self._last_locators = self._read_locators(song)
-        self._relisten_cues(song)
+        matched = {}
+        for exact in (True, False):
+            for n, (beat, name) in enumerate(wanted):
+                if n in matched:
+                    continue
+                hit = next((i for i, x in enumerate(current) if i not in used and abs(x[1] - beat) < LOCATOR_EPS
+                            and (x[2] == name or not exact)), None)
+                if hit is not None:
+                    used.add(hit)
+                    matched[n] = current[hit][0]
+        rename = [(beat, name, matched[n]) for n, (beat, name) in enumerate(wanted) if n in matched]
+        add = [(beat, name) for n, (beat, name) in enumerate(wanted)
+               if n not in matched and _round(beat) not in self._locator_skip]
+        delete = [cue for i, (cue, _, _) in enumerate(current) if i not in used and _ptr(cue) not in self._locator_keep]
+        return rename, delete, add
 
-    def _flush_pending_locators(self):
-        """再生中に届いたロケーターを、止まったら反映する。"""
-        song = self.song
-        if self._pending_locators is None or getattr(song, "is_playing", False):
+    def _rename_locators(self, song, wanted):
+        rename, _, _ = self._plan_locators(song, wanted)
+        for _beat, name, cue in rename:
+            try:
+                if str(getattr(cue, "name", "")) != name:
+                    cue.name = name
+            except Exception:
+                pass
+
+    def _step_locators(self):
+        """
+        届いたロケーターを 1 つずつ置く（tick ごとに呼ぶ）。
+          1. 置く（消す）位置へ再生位置を動かす
+          2. 次の tick で、再生位置がそこに着いていたらトグルする
+        を繰り返し、終わったら元の再生位置に戻す。再生中は、再生している人の音が飛ぶので止まるまで待つ。
+        """
+        wanted = self._pending_locators
+        if wanted is None:
             return
-        wanted, self._pending_locators = self._pending_locators, None
-        undo = getattr(song, "begin_undo_step", None)
-        try:
-            if undo is not None:
-                undo()
-            self._apply_locators_now(song, wanted)
-        finally:
-            if undo is not None:
-                try:
-                    song.end_undo_step()
-                except Exception:
-                    pass
-        # 届いた値を反映しただけなので送らない（Live が置けなかった分の違いだけは、次に読んだときに送られる）
+        song = self.song
+        if self._locator_base is not None and self._read_locators(song) != self._locator_base:
+            # 待っている間に、この Live で人がロケーターを編集した。ロケーターは全体で 1 つの値なので、
+            # 後から編集したこちらを優先して送る（届いたものは置かない）
+            self._finish_locators(song, wanted, local_edit=True)
+            return
+        if getattr(song, "is_playing", False):
+            self._locator_restore = None  # 置いている途中で再生した。再生位置はもう戻さない
+            self._locator_moved_to = None
+            return
+        now = float(getattr(song, "current_song_time", 0.0))
+        if self._locator_moved_to is not None and abs(now - self._locator_moved_to) >= LOCATOR_EPS:
+            # 置いている途中で、人が再生位置を動かした。戻す先をそこにする
+            self._locator_restore = now
+        self._locator_moved_to = None
+        self._rename_locators(song, wanted)
+        _, delete, add = self._plan_locators(song, wanted)
+        self._locator_steps += 1
+        # 思った通りにトグルできないときに、いつまでも再生位置を動かし続けない
+        if (delete or add) and self._locator_steps <= 3 * (len(wanted) + len(delete) + 4):
+            if self._locator_restore is None:
+                self._locator_restore = now
+            target = float(delete[0].time) if delete else add[0][0]
+            if abs(now - target) < LOCATOR_EPS:
+                self._toggle_locator(song, delete[0] if delete else None, add[0] if not delete else None)
+                self._locator_base = self._read_locators(song)
+                _, delete, add = self._plan_locators(song, wanted)
+                if not (delete or add):
+                    self._finish_locators(song, wanted)
+                    return
+                target = float(delete[0].time) if delete else add[0][0]
+            song.current_song_time = target
+            self._locator_moved_to = target
+            return
+        self._finish_locators(song, wanted)
+
+    def _toggle_locator(self, song, delete, add):
+        """再生位置でトグルし、思った通りになったかを確かめる。"""
+        before = dict((_ptr(c), c) for c in self._cues(song))
+        song.set_or_delete_cue()
+        after = dict((_ptr(c), c) for c in self._cues(song))
+        new = [c for p, c in after.items() if p not in before]
+        gone = [p for p in before if p not in after]
+        if delete is not None:
+            if _ptr(delete) in after:
+                self._locator_keep.add(_ptr(delete))  # 消せなかった。残しておく（何度もトグルしない）
+            return
+        beat, name = add
+        if len(new) == 1 and not gone:
+            cue = new[0]
+            if abs(float(cue.time) - beat) >= LOCATOR_EPS:
+                # グリッドに吸い付いた。この位置のロケーターとして覚えておく
+                self._locator_alias[_ptr(cue)] = (float(cue.time), beat)
+            try:
+                cue.name = name
+            except Exception:
+                pass
+        else:
+            # 吸い付いた先にあったロケーターが消えた・何も起きなかった。この位置はあきらめる
+            # （消えたものは、次の tick でグリッド上の位置に置き直す）
+            self._locator_skip.add(_round(beat))
+
+    def _finish_locators(self, song, wanted, local_edit=False):
+        """置き終わった（か、あきらめた・人が編集した）。再生位置を元に戻す。"""
+        self._pending_locators = None
+        self._locator_steps = 0
+        self._locator_moved_to = None
+        self._locator_base = None
+        self._locator_skip = set()
+        self._locator_keep = set()
+        if self._locator_restore is not None and not getattr(song, "is_playing", False):
+            try:
+                song.current_song_time = self._locator_restore
+            except Exception:
+                pass
+        self._locator_restore = None
+        self._relisten_cues(song)
+        now_locators = self._read_locators(song)
+        self._last_locators = now_locators
+        if local_edit:
+            self.dirty.add("locators")
+            return
+        # 届いた値は反映したことにする。置けなかったものがあっても、ここからは送らない
+        # （送ると、ほかの DAW のマーカーまで消してしまう）。Live で次に編集したときは、その時の Live の値が送られる
         self.last["locators"] = [list(r) for r in wanted]
         self.dirty.discard("locators")
+        if now_locators != [list(r) for r in wanted]:
+            self.warn("相手のロケーターの一部を Live に置けませんでした（近すぎる・グリッドの都合など）")
 
     # ------------------------------------------------------------ テンポ・拍子
 
@@ -1067,13 +1175,13 @@ class Model(object):
         if self._runtime_applying or self._runtime_set_sig == sig:
             return
         self._runtime_set_sig = None
-        if getattr(song, "is_playing", False) or self._cursor_moved(song):
-            return  # 再生中・位置を動かしたときは、Live の拍子の変化に合わせて変わったもの
         rows = self._sig_rows(song)
         if not sig_map_varies(rows):
             self._sig_map_shadow = [[0.0, sig[0], sig[1]]]
             self.dirty.update(("sig", "sig_map"))
             return
+        if getattr(song, "is_playing", False) or self._cursor_moved(song):
+            return  # 再生中・位置を動かしたときは、Live の拍子の変化に合わせて変わったもの
         beat = self._cursor(song)
         if sig_at(rows, beat) == sig:
             return
@@ -1168,6 +1276,8 @@ class Model(object):
         止まっているときは、届いた直後と、再生位置を動かしたときだけ合わせる（手で変えた値をすぐ上書きしないように）。
         """
         song = self.song
+        if self._locator_restore is not None:
+            return  # ロケーターを置くために再生位置を動かしている途中
         beat = self._cursor(song)
         moved = self._runtime_last_beat is None or abs(beat - self._runtime_last_beat) > 1e-6
         self._runtime_last_beat = beat
@@ -2081,11 +2191,27 @@ class Model(object):
         self.dirty = set()
         self.removed = set()
 
+    def _step_failed(self, step, error):
+        name = getattr(step, "__name__", "?")
+        if name == "_step_locators":
+            # 同じところで毎 tick 失敗し続けないよう、届いたロケーターはあきらめる
+            self._pending_locators = None
+            self._locator_restore = None
+            self._locator_moved_to = None
+            self._locator_base = None
+        key = (name, type(error).__name__)
+        if key not in self._step_errors:
+            self._step_errors.add(key)
+            self.warn("Live のスクリプトでエラーが起きました（%s: %s: %s）。同期は続けています"
+                      % (name, type(error).__name__, error))
+
     def collect_changes(self):
         # 届いたテンポ・拍子の変化に追従させる（これで変わった song.tempo などはリスナーが無視する）
-        self._apply_runtime_maps()
-        self._flush_pending_locators()
-        self._poll_arrangement()
+        for step in (self._apply_runtime_maps, self._step_locators, self._poll_arrangement):
+            try:
+                step()
+            except Exception as e:  # noqa: BLE001
+                self._step_failed(step, e)
         ops = []
         for key in self.removed:
             self.last[key] = None

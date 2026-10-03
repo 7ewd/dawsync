@@ -334,6 +334,34 @@ public class BridgeExtension extends ControllerExtension {
                             mInternals.end(mModel.dig);
                         }
                     }
+                    case "cue-add", "cue-move", "cue-name", "cue-del" -> {
+                        // Bitwig 側のキューマーカーの編集（テスト用）: cue-add 位置 名前 / cue-move 位置 新しい位置
+                        // / cue-name 位置 名前 / cue-del 位置
+                        var timeline = mApi.getCueMarkers();
+                        com.bitwig.extension.api.project.timeline.CueMarker hit = null;
+                        for (Object e : timeline.getEvents())
+                            if (e instanceof com.bitwig.extension.api.project.timeline.CueMarker m && Math.abs(m.getTime() - Double.parseDouble(a[1])) < 1e-3) hit = m;
+                        mInternals.begin(mModel.dig, "DAW Sync test");
+                        try {
+                            switch (a[0]) {
+                                case "cue-add" -> {
+                                    var f = (com.bitwig.extension.api.project.Factory) mApi.getClass().getMethod("getFactory").invoke(mApi);
+                                    var m = f.createCueMarker(BitwigModel.put(Double.parseDouble(a[1])));
+                                    m.setTitle(a.length > 2 ? a[2] : "");
+                                    timeline.addEvent(m);
+                                }
+                                case "cue-move" -> hit.setTime(BitwigModel.put(Double.parseDouble(a[2])));
+                                case "cue-name" -> hit.setTitle(a[2]);
+                                default -> {
+                                    // 1 つだけ消す API は無いので、その位置のあたりだけ消す
+                                    double t = hit.getTime();
+                                    timeline.clearTime(Math.max(0, t - 1e-3), t + 1e-3);  // 区間の始まりと終わり
+                                }
+                            }
+                        } finally {
+                            mInternals.end(mModel.dig);
+                        }
+                    }
                     case "clip-dur", "clip-move", "clip-note", "clip-trim", "clip-loop" -> {
                         // Bitwig 側の編集（テスト用）: clip-dur トラック名 開始 長さ / clip-move トラック名 開始 新しい開始
                         // / clip-note トラック名 開始 音程 位置 長さ / clip-trim トラック名 開始 新しい開始（左端を動かす）

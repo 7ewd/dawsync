@@ -5,7 +5,7 @@ namespace DawSync.Core;
 /// <summary>アプリのバージョン（ルームで相手とバージョンが違うと知らせるのに使う）。</summary>
 public static class AppInfo
 {
-    public const string Version = "1.0.3";
+    public const string Version = "1.0.4";
 
     /// <summary>"1.2.3" のようなバージョンを比べる（読めないものは一番古い扱い）。</summary>
     public static int Compare(string? a, string? b) => Parse(a).CompareTo(Parse(b));
