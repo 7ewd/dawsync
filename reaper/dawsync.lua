@@ -9,7 +9,7 @@
 --                                                    app_alive     アプリがつながっている印（時刻 と 接続ごとの番号）
 -- REAPER の起動時に Scripts/__startup.lua から読み込まれる（アプリの「REAPER にスクリプトを入れる」で設定される）。
 
-local VERSION = "1.0.2"
+local VERSION = "1.0.3"
 local PROTOCOL = 2
 local APP_PORT = 47400
 -- アプリの印（app_alive）がこれだけ古くなったら切れたとみなす。大きなプロジェクトでは REAPER の画面の処理が

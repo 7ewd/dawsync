@@ -10,7 +10,7 @@ import com.bitwig.extension.controller.api.ControllerHost;
 
 /** Bitwig の「コントローラー」として追加すると、同じ PC の DawSync アプリとつながる。 */
 public class BridgeDefinition extends ControllerExtensionDefinition {
-    static final String VERSION = "1.0.2";
+    static final String VERSION = "1.0.3";
 
     @Override public String getName() { return "DAW Sync"; }
     @Override public String getAuthor() { return "DAW Sync"; }
