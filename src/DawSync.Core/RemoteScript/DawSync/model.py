@@ -538,9 +538,10 @@ class Model(object):
             self._listen(cue, "time", self._mark("locators"))
 
         # Live の Remote Script API にはテンポ／拍子のアレンジメント・エンベロープを
-        # 読み書きする機能がない。ほかの DAW から届いたマップは拍 0 の基準値だけ反映し、
-        # 非ゼロ位置は Live 側で編集できないため警告するが、受信したマップは
-        # シャドウとして保持し、次回スナップショットで他 DAW に返せるようにする。
+        # 直接編集する機能がない。ほかの DAW から届いたマップは拍 0 の基準値を反映し、
+        # 再生中は current_song_time に合わせて追従する。保存済み .als のテンポ点は
+        # XML から読み取れる。非ゼロ位置を Live のエンベロープへ直接書けないため警告するが、
+        # 受信したマップはシャドウとして保持し、次回スナップショットで他 DAW に返せるようにする。
         self._bind("tempo_map", lambda: self._read_tempo_map(song),
                    lambda value: self._write_tempo_map(song, value), [(song, "tempo")])
         self._bind("sig_map", lambda: self._read_sig_map(song),

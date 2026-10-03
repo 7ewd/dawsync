@@ -22,7 +22,7 @@ even across different OSs and DAWs<br>
 - `.als` dependency checks for samples, plug-ins, and Packs
 - English / Japanese language
 
-Mixer settings (volume, pan, sends, and effects) remain local to each participant. Live's Remote Script API cannot edit arrangement tempo or time-signature automation, so Live applies the beat-zero value while preserving the remaining map points for other hosts.
+Mixer settings (volume, pan, sends, and effects) remain local to each participant. Live's Remote Script API cannot insert Arrangement automation points. DAW Sync applies the beat-zero value and follows received tempo / time-signature rows during playback; with Global Record and Automation Arm enabled, Live can record those changes. Saved `.als` tempo envelopes are read and shared after the set is saved.
 
 ## Download
 
