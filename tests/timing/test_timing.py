@@ -94,6 +94,42 @@ check("Live: Live のエンベロープ（点と点の間は直線）をテン�
 check("Live: .als の拍子の値", model._decode_als_sig(201) == (4, 4) and model._decode_als_sig(200) == (3, 4)
       and model._decode_als_sig(6 + 3 * 99) == (7, 8))
 
+
+def live_follow_checks():
+    """Live の追従: ルームから届いたものだけに追従し、Live 自身のオートメーションはむやみに上書きしない。"""
+    import Live as mock_live
+    song = mock_live.Song()
+    warnings = []
+    m = model.Model(lambda: song, lambda s: None, warnings.append)
+    m.rebuild(announce=False)
+    timing = ("tempo", "sig", "tempo_map", "sig_map")
+
+    def play(points):
+        sent = []
+        for beat, bpm in points:
+            song.current_song_time = beat
+            if bpm is not None:
+                song.tempo = bpm  # Live のオートメーションが動かした
+            sent += [o["k"] for o in m.collect_changes() if o["k"] in timing]
+        return sent
+
+    song.master_track.mixer_device.song_tempo.automation_state = 1
+    song.is_playing = True
+    sent = play([(0, 120.0), (4, 133.0), (8, 150.0)])
+    check("Live: 何も届いていなければ、Live のオートメーションを上書きしない", song.tempo == 150.0 and not sent, (song.tempo, sent))
+    m.apply([{"k": "tempo_map", "v": [[0, 128]]}], True, {})
+    sent = play([(12, 90.0), (13, None)])
+    check("Live: ルームにテンポの変化が無ければ、Live で書いた（まだ保存していない）オートメーションに任せる",
+          song.tempo == 90.0 and not sent and any("保存" in w for w in warnings), (song.tempo, sent, warnings))
+    m.apply([{"k": "tempo_map", "v": [[0, 100], [8, 140]]}], True, {})
+    sent = play([(10, 90.0), (11, None)])
+    check("Live: ルームにテンポの変化があれば、それに追従する", song.tempo == 140.0 and not sent, (song.tempo, sent))
+    song.master_track.mixer_device.song_tempo.automation_state = 0
+    song.is_playing = False
+
+
+live_follow_checks()
+
 # ------------------------------------------------------------------ REAPER（Lua）
 
 try:

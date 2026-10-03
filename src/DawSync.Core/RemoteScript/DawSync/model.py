@@ -537,6 +537,9 @@ class Model(object):
         self._file_tempo_map = None   # 最後に読んだ .als のテンポ（Live 自身のエンベロープ）
         self._file_sig_map = None
         self._tempo_follow_cache = None
+        # ルームから届いたテンポ・拍子の変化があるか。無ければ追従させない（一人で使っているときに、
+        # Live で書いたオートメーションを上書きしないように）
+        self._timing_from_room = False
         self._runtime_last_beat = None
         self._runtime_pending_apply = False
         self._runtime_applying = False
@@ -1093,6 +1096,7 @@ class Model(object):
             self._tempo_map_shadow = set_tempo_at(rows, 0.0, bpm)
         else:
             self._tempo_map_shadow = [[0.0, _round(bpm, 3)]]
+        self._timing_from_room = True
         self._runtime_pending_apply = True
         self._apply_runtime_maps()
 
@@ -1108,6 +1112,7 @@ class Model(object):
             self._sig_map_shadow = set_sig_at(rows, 0.0, num, den)
         else:
             self._sig_map_shadow = [[0.0, num, den]]
+        self._timing_from_room = True
         self._runtime_pending_apply = True
         self._apply_runtime_maps()
 
@@ -1117,6 +1122,7 @@ class Model(object):
             return
         self._ensure_timing(song)
         self._tempo_map_shadow = rows
+        self._timing_from_room = True
         self._runtime_pending_apply = True
         if len(rows) > 1:
             self._warn_once("tempo-map", "Live の API ではアレンジメントのテンポ・オートメーションを書き込めないので、"
@@ -1129,6 +1135,7 @@ class Model(object):
             return
         self._ensure_timing(song)
         self._sig_map_shadow = rows
+        self._timing_from_room = True
         self._runtime_pending_apply = True
         if len(rows) > 1:
             self._warn_once("sig-map", "Live の API ではアレンジメントの拍子の変化を書き込めないので、"
@@ -1136,14 +1143,22 @@ class Model(object):
         self._apply_runtime_maps()
 
     def _follow_tempo(self, song):
-        """届いたテンポの変化に song.tempo を追従させるか。Live 自身のオートメーションが同じ変化を
-        再生しているなら任せる（追従させて上書きすると、Live のオートメーションが止まってしまう）。"""
+        """
+        届いたテンポの変化に song.tempo を追従させるか。Live 自身のオートメーションが再生しているときは、
+        それが同じ変化か、ルームにテンポの変化が無い（Live で書いたばかりで、まだ保存していない）なら任せる
+        （追従させて上書きすると、Live のオートメーションが止まってしまう）。
+        """
+        if self._live_tempo_automation(song) != 1:
+            return True
         key = (id(self._tempo_map_shadow), id(self._file_tempo_map))
         if self._tempo_follow_cache is None or self._tempo_follow_cache[0] != key:
+            varies = tempo_map_varies(self._tempo_map_shadow)
             same = bool(self._file_tempo_map) and tempo_map_varies(self._file_tempo_map) \
                 and tempo_maps_close(self._tempo_map_shadow, self._file_tempo_map, 0.05)
-            self._tempo_follow_cache = (key, same)
-        return not (self._tempo_follow_cache[1] and self._live_tempo_automation(song) == 1)
+            self._tempo_follow_cache = (key, varies and not same)
+        if not self._tempo_follow_cache[1] and not tempo_map_varies(self._tempo_map_shadow):
+            self._warn_once("live-tempo-automation", "Live で書いたテンポのオートメーションは、セットを保存すると相手に届きます")
+        return self._tempo_follow_cache[1]
 
     def _apply_runtime_maps(self):
         """Live のテンポ・拍子を、このセットのテンポ・拍子の変化に追従させる。
@@ -1156,6 +1171,8 @@ class Model(object):
         beat = self._cursor(song)
         moved = self._runtime_last_beat is None or abs(beat - self._runtime_last_beat) > 1e-6
         self._runtime_last_beat = beat
+        if not self._timing_from_room:
+            return  # 届いたものが無い（Live のセットのまま）
         playing = bool(getattr(song, "is_playing", False))
         tempo_rows, sig_rows = self._tempo_map_shadow, self._sig_map_shadow
         varies = (tempo_rows is not None and len(tempo_rows) > 1) or (sig_rows is not None and len(sig_rows) > 1)
