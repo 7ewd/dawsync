@@ -1,10 +1,6 @@
 # DAW Sync
 [English](README_en.md) / [日本語](README_ja.md)
 
-<img src="assets/DAW-Sync-logo-vtuber.png" alt="DAW Sync logo" width="50%">
-
-<img src="assets/DAW-Sync-poster.png" alt="DAW Sync supported DAWs poster" width="50%">
-
 DAW Sync lets composers work together in real time<br>
 even across different OSs and DAWs<br>
 <b>so you can edit MIDI notes, drop in samples, and share them on the fly.</b>
