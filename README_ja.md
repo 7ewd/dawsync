@@ -1,10 +1,6 @@
 # DAW Sync
 [English](README_en.md) / [日本語](README_ja.md)
 
-<img src="assets/DAW-Sync-logo-vtuber.png" alt="DAW Sync logo" width="50%">
-
-<img src="assets/DAW-Sync-poster.png" alt="DAW Sync supported DAWs poster" width="50%">
-
 DAW Syncは、異なるOSやDAWを使う人同士が、簡単に合作できるように設計されたソフトウェアです。<br>
 主にリアルタイムでMIDIを編集、オーディオサンプルの配置ができます。
 
