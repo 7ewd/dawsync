@@ -26,7 +26,7 @@ Mixer settings (volume, pan, sends, and effects) remain local to each participan
 
 ## Download
 
-[Windows executable](https://github.com/7ewd/dawsync/releases/download/v1.0/DawSync.exe) · [Windows zip](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/dawsync/releases/download/v1.0/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0 release](https://github.com/7ewd/dawsync/releases/tag/v1.0)
+[Windows executable](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DawSync.exe) · [Windows zip](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0.1 release](https://github.com/7ewd/dawsync/releases/tag/v1.0.1)
 
 All three builds are self-contained; no .NET installation or additional runtime files are required. The app contains the Live, Bitwig, and REAPER integration files and installs them from the interface.
 

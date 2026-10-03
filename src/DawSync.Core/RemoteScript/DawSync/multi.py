@@ -32,7 +32,7 @@ from .model import Model
 APP_HOST = "127.0.0.1"
 APP_PORT = 47400
 PROTOCOL = 2
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.0.1"
 
 # 開発用: このフォルダに debug があるときだけ、テストから Live を操作できる（cmd.py を実行・state.json に状態を書く・
 # port でつなぐ先のポートを変える）。普段は何もしない
