@@ -20,11 +20,11 @@ DAW Syncは、異なるOSやDAWを使う人同士が、簡単に合作できる�
 - `.als` のサンプル、プラグイン、Pack などの依存関係チェック
 - 英語 / 日本語の画面表示
 
-ミキサー設定（音量、パン、センド、エフェクト）は参加者ごとに保持します。Live の Remote Script API にはアレンジメントのオートメーション点を追加する機能がないため、拍 0 の値を反映し、再生中は受信したテンポ／拍子マップに追従します。Global Record と Automation Arm を有効にすれば、Live 側でその変化を記録できます。保存済み `.als` のテンポエンベロープは読み取って共有します。
+ミキサー設定（音量、パン、センド、エフェクト）は参加者ごとに保持します。Live の Remote Script API にはアレンジメントのオートメーション点を追加する機能がないため、受信時に現在位置のテンポ／拍子を反映し、再生中はマップに追従します。Global Record と Automation Arm を有効にすれば、Live 側でその変化を記録できます。保存済み `.als` のテンポエンベロープは読み取って共有します。
 
 ## ダウンロード
 
-[Windows exe](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DawSync.exe) · [Windows zip](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0.1 リリース](https://github.com/7ewd/dawsync/releases/tag/v1.0.1)
+[Windows exe](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DawSync.exe) · [Windows zip](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0.2 リリース](https://github.com/7ewd/dawsync/releases/tag/v1.0.2)
 
 各 OS 版は自己完結型です。.NET のインストールや追加ランタイムは必要ありません。Live、Bitwig、REAPER 用の連携ファイルも含まれており、アプリからインストールできます。
 

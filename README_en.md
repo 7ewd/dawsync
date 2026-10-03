@@ -22,11 +22,11 @@ even across different OSs and DAWs<br>
 - `.als` dependency checks for samples, plug-ins, and Packs
 - English / Japanese language
 
-Mixer settings (volume, pan, sends, and effects) remain local to each participant. Live's Remote Script API cannot insert Arrangement automation points. DAW Sync applies the beat-zero value and follows received tempo / time-signature rows during playback; with Global Record and Automation Arm enabled, Live can record those changes. Saved `.als` tempo envelopes are read and shared after the set is saved.
+Mixer settings (volume, pan, sends, and effects) remain local to each participant. Live's Remote Script API cannot insert Arrangement automation points. DAW Sync applies the effective tempo / time signature at the current position when a map arrives and follows the rows during playback; with Global Record and Automation Arm enabled, Live can record those changes. Saved `.als` tempo envelopes are read and shared after the set is saved.
 
 ## Download
 
-[Windows executable](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DawSync.exe) · [Windows zip](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/dawsync/releases/download/v1.0.1/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0.1 release](https://github.com/7ewd/dawsync/releases/tag/v1.0.1)
+[Windows executable](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DawSync.exe) · [Windows zip](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-windows.zip) · [macOS arm64](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-osx-arm64.zip) · [macOS x64](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-osx-x64.zip) · [Linux x64](https://github.com/7ewd/dawsync/releases/download/v1.0.2/DAW-Sync-linux-x64.tar.gz) · [DAW Sync 1.0.2 release](https://github.com/7ewd/dawsync/releases/tag/v1.0.2)
 
 All three builds are self-contained; no .NET installation or additional runtime files are required. The app contains the Live, Bitwig, and REAPER integration files and installs them from the interface.
 

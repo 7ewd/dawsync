@@ -139,7 +139,25 @@ public sealed class SessionController : IAsyncDisposable
         _ = Task.Run(IncomingLoopAsync);
     }
 
-    public bool ScriptOutdated => Bridge.IsConnected && Bridge.ScriptProtocolVersion != LiveBridge.ScriptProtocol;
+    /// <summary>
+    /// 接続中のDAW側コードが、このアプリに同梱したコードか確認する。
+    /// 通信プロトコルだけは互換性を保つことがあるため、プロトコル番号だけを
+    /// 見ると、古いスクリプトが新しい同期機能（ロケーター／テンポマップ／拍子
+    /// マップなど）を持っていないまま動き続けてしまう。
+    /// </summary>
+    public bool ScriptOutdated => Bridge.IsConnected
+        && (Bridge.ScriptProtocolVersion != LiveBridge.ScriptProtocol || !IsCurrentScript(Bridge.ScriptVersion));
+
+    private static bool IsCurrentScript(string? reported)
+    {
+        if (string.IsNullOrWhiteSpace(reported)) return false;
+        // Live はそのまま、REAPER/Bitwig は "reaper-1.0.2" / "bitwig-1.0.2"
+        // の形で知らせる。接頭辞はDAW名なので、最後のバージョン部分だけ比較する。
+        var version = reported;
+        var dash = version.LastIndexOf('-');
+        if (dash >= 0 && dash + 1 < version.Length) version = version[(dash + 1)..];
+        return AppInfo.Compare(version, AppInfo.Version) == 0;
+    }
 
     public void StartBridge(int port = LiveBridge.DefaultPort)
     {

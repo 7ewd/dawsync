@@ -262,6 +262,15 @@ check("テンポマップの基準値", lambda: B.song.tempo == 100.0
 B.script._model.apply([{"k": "sig_map", "v": [[0.0, 3, 4], [16.0, 7, 8]]}], True, {})
 check("拍子マップの基準値", lambda: (B.song.signature_numerator, B.song.signature_denominator) == (3, 4)
       and B.script._model.read("sig_map") == [[0.0, 3, 4], [16.0, 7, 8]])
+# 受信したマップを停止中のカーソル位置へ一度反映しても、実効値を自分の
+# 変更として再送しない（再送するとルームのマップの拍 0 が壊れる）。
+B.song.current_song_time = 16.0
+B.song.is_playing = False
+_stopped_map_ops = B.script._model.collect_changes()
+check("停止中の受信マップを現在位置へ反映", lambda: B.song.tempo == 140.0
+      and (B.song.signature_numerator, B.song.signature_denominator) == (7, 8))
+check("受信マップを自分の変更として送り返さない",
+      lambda: not any(o["k"] in ("tempo", "sig", "tempo_map", "sig_map") for o in _stopped_map_ops))
 # Keep the normal simulation state intact while probing playback-only behavior.
 # In particular, do not mark every key as sent: doing so would hide the next
 # real edit from the collaboration loop.

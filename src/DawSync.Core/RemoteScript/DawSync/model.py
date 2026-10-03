@@ -142,16 +142,16 @@ class Model(object):
         self._tempo_file_stamp = None
         self._tempo_file_map = None
         self._tempo_remote_file_stamp = None
-        # Live's Remote Script API has no breakpoint/envelope writer.  While the
-        # Arrangement is playing we still apply received map rows at their beat
-        # positions, which keeps playback in sync even though Live cannot persist
-        # those rows as an editable envelope.  The map is deliberately dormant
-        # while stopped so changing the global tempo in the UI remains possible.
+        # Live's Remote Script API has no breakpoint/envelope writer.  Apply an
+        # incoming map once at the current cursor and then follow its rows during
+        # playback; keep the map as a shadow so unsupported points survive snapshots.
         self._runtime_tempo_map = None
         self._runtime_sig_map = None
         self._runtime_tempo_index = 0
         self._runtime_sig_index = 0
         self._runtime_last_beat = None
+        self._runtime_pending_apply = False
+        self._runtime_applying = False
         self._runtime_dirty = False
         self._collections = {}      # id -> そのオブジェクトが属する Collection
         self._containers = {}       # 置き場所のキー -> (Track / Chain, Collection)
@@ -244,6 +244,8 @@ class Model(object):
         self._runtime_tempo_index = 0
         self._runtime_sig_index = 0
         self._runtime_last_beat = None
+        self._runtime_pending_apply = False
+        self._runtime_applying = False
         self._runtime_dirty = False
         self.needs_rebuild = True
 
@@ -520,13 +522,33 @@ class Model(object):
 
         def set_tempo(v):
             song.tempo = float(v)
-        self._bind("tempo", lambda: _round(song.tempo, 3), set_tempo, [(song, "tempo")])
+            if self._tempo_map_shadow and not self._runtime_applying:
+                zero = min(self._tempo_map_shadow, key=lambda row: abs(float(row[0])))
+                zero[1] = _round(song.tempo, 3)
+        def tempo_changed():
+            self.dirty.add("tempo")
+            if self._tempo_map_shadow and not self._runtime_applying:
+                zero = min(self._tempo_map_shadow, key=lambda row: abs(float(row[0])))
+                zero[1] = _round(song.tempo, 3)
+                self.dirty.add("tempo_map")
+        self._bind("tempo", lambda: _round(song.tempo, 3), set_tempo)
+        self._listen(song, "tempo", tempo_changed)
 
         def set_sig(v):
             song.signature_numerator = int(v[0])
             song.signature_denominator = int(v[1])
-        self._bind("sig", lambda: [song.signature_numerator, song.signature_denominator], set_sig,
-                   [(song, "signature_numerator"), (song, "signature_denominator")])
+            if self._sig_map_shadow and not self._runtime_applying:
+                zero = min(self._sig_map_shadow, key=lambda row: abs(float(row[0])))
+                zero[1], zero[2] = int(song.signature_numerator), int(song.signature_denominator)
+        def sig_changed():
+            self.dirty.add("sig")
+            if self._sig_map_shadow and not self._runtime_applying:
+                zero = min(self._sig_map_shadow, key=lambda row: abs(float(row[0])))
+                zero[1], zero[2] = int(song.signature_numerator), int(song.signature_denominator)
+                self.dirty.add("sig_map")
+        self._bind("sig", lambda: [song.signature_numerator, song.signature_denominator], set_sig)
+        self._listen(song, "signature_numerator", sig_changed)
+        self._listen(song, "signature_denominator", sig_changed)
 
         # Arrangement のロケーターは Live の LOM から位置・名称を読み取れる。
         # cue point の作成／削除 API は現在位置でトグルする set_or_delete_cue のみなので、
@@ -655,6 +677,7 @@ class Model(object):
             self._runtime_tempo_map = [list(row) for row in self._tempo_map_shadow]
             self._runtime_tempo_index = 0
             self._runtime_last_beat = None
+            self._runtime_pending_apply = True
             path = getattr(song, "file_path", None)
             try:
                 stat = os.stat(path) if path else None
@@ -667,11 +690,12 @@ class Model(object):
             except (TypeError, ValueError):
                 pass
         if any(abs(float(r[0])) > 1e-5 for r in rows):
-            self._warn_once("tempo-map", "Live の Remote Script API ではテンポ・オートメーションの点を編集できないため、拍 0 を反映し、再生中は各拍でBPMを追従します（Global Record/Automation Arm が有効ならLive側で記録されます）")
+            self._warn_once("tempo-map", "Live の Remote Script API ではテンポ・オートメーションの点を編集できないため、拍 0 と現在位置を反映し、再生中は各拍でBPMを追従します（Global Record/Automation Arm が有効ならLive側で記録されます）")
         elif not rows:
             self._tempo_map_shadow = None
             self._runtime_tempo_map = None
             self._runtime_tempo_index = 0
+            self._runtime_pending_apply = False
             self._tempo_remote_file_stamp = None
 
     def _write_sig_map(self, song, value):
@@ -681,6 +705,7 @@ class Model(object):
             self._runtime_sig_map = [list(row) for row in self._sig_map_shadow]
             self._runtime_sig_index = 0
             self._runtime_last_beat = None
+            self._runtime_pending_apply = True
             zero = min(rows, key=lambda r: abs(float(r[0])))
             try:
                 song.signature_numerator = int(zero[1])
@@ -688,23 +713,25 @@ class Model(object):
             except (TypeError, ValueError):
                 pass
         if any(abs(float(r[0])) > 1e-5 for r in rows):
-            self._warn_once("sig-map", "Live の Remote Script API ではアレンジメント拍子変更の点を編集できないため、拍 0 を反映し、再生中は各拍で拍子を追従します")
+            self._warn_once("sig-map", "Live の Remote Script API ではアレンジメント拍子変更の点を編集できないため、拍 0 と現在位置を反映し、再生中は各拍で拍子を追従します")
         elif not rows:
             self._sig_map_shadow = None
             self._runtime_sig_map = None
             self._runtime_sig_index = 0
+            self._runtime_pending_apply = False
 
     def _apply_runtime_maps(self):
-        """再生中だけ、Live のグローバル値を受信したマップに追従させる。
+        """Live のグローバル値を受信したマップに追従させる。
 
         Live の Python API にはエンベロープのブレークポイントを挿入する
         メソッドがないため、停止中のセットへ擬似的な点を作ることはできない。
-        しかし再生中に同じ拍で ``song.tempo`` / 拍子を更新すると、他 DAW と
-        聴感上のテンポ・拍子は同期できる。ユーザーが停止中に編集した値を
-        上書きしないよう、``is_playing`` が真のときだけ実行する。
+        受信直後は現在のカーソル位置の実効値を一度だけ反映し、再生中は各拍で
+        ``song.tempo`` / 拍子を更新する。受信直後の一度きりの反映が終わったら、
+        停止中にユーザーが編集した値を上書きしない。
         """
         song = self.song
-        if not bool(getattr(song, "is_playing", False)):
+        playing = bool(getattr(song, "is_playing", False))
+        if not playing and not self._runtime_pending_apply:
             self._runtime_last_beat = None
             self._runtime_tempo_index = 0
             self._runtime_sig_index = 0
@@ -727,7 +754,11 @@ class Model(object):
             target = float(rows[self._runtime_tempo_index][1])
             try:
                 if abs(float(song.tempo) - target) > 1e-3:
-                    song.tempo = target
+                    self._runtime_applying = True
+                    try:
+                        song.tempo = target
+                    finally:
+                        self._runtime_applying = False
                     self._runtime_dirty = True
             except (AttributeError, TypeError, ValueError):
                 pass
@@ -739,11 +770,18 @@ class Model(object):
             target_num, target_den = int(rows[self._runtime_sig_index][1]), int(rows[self._runtime_sig_index][2])
             try:
                 if (int(song.signature_numerator), int(song.signature_denominator)) != (target_num, target_den):
-                    song.signature_numerator = target_num
-                    song.signature_denominator = target_den
+                    self._runtime_applying = True
+                    try:
+                        song.signature_numerator = target_num
+                        song.signature_denominator = target_den
+                    finally:
+                        self._runtime_applying = False
                     self._runtime_dirty = True
             except (AttributeError, TypeError, ValueError):
                 pass
+
+        if not playing:
+            self._runtime_pending_apply = False
 
     def _read_tempo_map(self, song):
         saved = self._read_saved_tempo_map(song)
@@ -761,10 +799,7 @@ class Model(object):
                 self._tempo_remote_file_stamp = None
                 return [list(row) for row in rows]
         if self._tempo_map_shadow:
-            result = [list(row) for row in self._tempo_map_shadow]
-            zero = min((row for row in result), key=lambda row: abs(float(row[0])))
-            zero[1] = _round(song.tempo, 3)
-            return result
+            return [list(row) for row in self._tempo_map_shadow]
         return [[0.0, _round(song.tempo, 3)]]
 
     def _read_saved_tempo_map(self, song):
@@ -853,10 +888,7 @@ class Model(object):
 
     def _read_sig_map(self, song):
         if self._sig_map_shadow:
-            result = [list(row) for row in self._sig_map_shadow]
-            zero = min((row for row in result), key=lambda row: abs(float(row[0])))
-            zero[1], zero[2] = int(song.signature_numerator), int(song.signature_denominator)
-            return result
+            return [list(row) for row in self._sig_map_shadow]
         return [[0.0, int(song.signature_numerator), int(song.signature_denominator)]]
 
     def _bind_named(self, prefix, obj, mute_solo):
@@ -1691,6 +1723,14 @@ class Model(object):
         if self._runtime_dirty:
             self.dirty.discard("tempo")
             self.dirty.discard("sig")
+            # Runtime map playback changes the same Song properties that are
+            # listened to by both scalar and map bindings. They are derived
+            # values, so do not echo them back as a new map operation.
+            self.dirty.discard("tempo_map")
+            self.dirty.discard("sig_map")
+            for key in ("tempo", "sig", "tempo_map", "sig_map"):
+                if key in self.bindings:
+                    self.last[key] = self.read(key)
             self._runtime_dirty = False
         self._poll_arrangement()
         ops = []
