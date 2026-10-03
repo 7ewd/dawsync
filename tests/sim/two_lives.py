@@ -294,6 +294,10 @@ B.song.is_playing = False
 B.song.current_song_time = 32.0
 B.script._model.collect_changes()
 check("停止中はテンポマップを上書きしない", lambda: B.song.tempo == 140.0)
+B.song.current_song_time = 0.0
+B.song.is_playing = True
+B.script._model.collect_changes()
+check("停止後に先頭から再生するとテンポマップを再適用", lambda: B.song.tempo == 100.0)
 B.song.is_playing = True
 B.song.current_song_time = 16.0
 B.script._model.collect_changes()
