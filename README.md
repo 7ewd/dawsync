@@ -1,7 +1,7 @@
 # DAW Sync
 [English](README_en.md) / [日本語](README_ja.md)
 
-DAW Sync lets composers work together in real time<br>
+DAW Sync is composers to collab in real-time, just like in multiplay!<br>
 even across different OSs and DAWs<br>
 <b>so you can edit MIDI notes, drop in samples, and share them on the fly.</b>
 
