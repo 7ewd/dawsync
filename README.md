@@ -18,10 +18,6 @@ even across different OSs and DAWs<br>
 - `.als` dependency checks for samples, plug-ins, and Packs
 - English / Japanese language
 
-Mixer settings (volume, pan, sends, and effects) remain local to each participant.
-
-Tempo automation is synced with both steps (instant changes) and ramps (gradual changes). REAPER and Bitwig read and write tempo markers / automation directly. Live's Remote Script API cannot read or write Arrangement automation, so Live follows incoming tempo / time-signature changes in real time during playback and matches the value at the playhead while stopped (with Global Record and Automation Arm enabled, Live can record those changes). Tempo / time-signature automation drawn in Live is shared when you save the set. Live can only create locators at the playhead, so locators received during playback are placed when playback stops.
-
 ## Download
 
 Source code and release notes are available in the [DAW Sync 1.0.4 release](https://github.com/7ewd/dawsync/releases/tag/v1.0.4).
