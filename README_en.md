@@ -28,8 +28,6 @@ Source code and release notes are available in the [DAW Sync 1.0.4 release](http
 2. Install the integration for your DAW from the app.
 3. Share the invite code and collaborate.
 
-When upgrading from Maltese, install the integration again so the renamed DAW Sync scripts are selected by the DAW.
-
 ## Tested with
 
 - Ableton Live Suite 12 (12.4.6)
