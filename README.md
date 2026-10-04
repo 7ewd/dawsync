@@ -15,7 +15,6 @@ even across different OSs and DAWs<br>
 - Sync locator names and positions, tempo / time-signature changes, tracks, scenes, and MIDI / audio clips
 - Edit together from Live, Bitwig, and REAPER
 - Password-protected rooms and Cloudflare Quick Tunnel invitations
-- `.als` dependency checks for samples, plug-ins, and Packs
 - English / Japanese language
 
 ## Download
