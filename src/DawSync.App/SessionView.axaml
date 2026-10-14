@@ -36,16 +36,18 @@
                 <!-- ① DAW（Live / Bitwig） -->
                 <Border Classes="card" Padding="18">
                     <StackPanel Spacing="10">
-                        <TextBlock x:Name="DawStep" Classes="step" Text="① Ableton Live / Bitwig / REAPER とつなぐ" />
-                        <StackPanel Orientation="Horizontal" Spacing="9">
-                            <Ellipse x:Name="LiveDot" Classes="dot" />
-                            <TextBlock x:Name="LiveStatus" FontSize="14" VerticalAlignment="Center" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <Button x:Name="InstallButton" HorizontalAlignment="Stretch"
+                        <TextBlock x:Name="DawStep" Classes="step" TextWrapping="Wrap" Text="① Ableton Live / Bitwig / REAPER / FL Studio とつなぐ" />
+                        <Grid ColumnDefinitions="Auto,*">
+                            <Ellipse x:Name="LiveDot" Classes="dot" Margin="0,0,9,0" />
+                            <TextBlock x:Name="LiveStatus" Grid.Column="1" FontSize="14" VerticalAlignment="Center" TextWrapping="Wrap" />
+                        </Grid>
+                        <Button x:Name="InstallButton" Classes="install" HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Center" Padding="0,8" />
-                        <Button x:Name="BitwigInstallButton" HorizontalAlignment="Stretch"
+                        <Button x:Name="BitwigInstallButton" Classes="install" HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Center" Padding="0,8" />
-                        <Button x:Name="ReaperInstallButton" HorizontalAlignment="Stretch"
+                        <Button x:Name="ReaperInstallButton" Classes="install" HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" Padding="0,8" />
+                        <Button x:Name="FlStudioInstallButton" Classes="install" HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Center" Padding="0,8" />
                         <Button x:Name="HowToToggle" Classes="link" Content="つなぎ方を見る ▾" />
                         <Border x:Name="HowToPanel" Background="{DynamicResource InsetBackground}" CornerRadius="0"
@@ -61,6 +63,10 @@
                                 <TextBlock x:Name="HowReaperTitle" FontSize="13" FontWeight="SemiBold" Margin="0,6,0,0" Text="REAPER" />
                                 <TextBlock x:Name="HowReaper1" TextWrapping="Wrap" FontSize="13" Text="1. 上のボタンで REAPER にスクリプトを入れる" />
                                 <TextBlock x:Name="HowReaper2" TextWrapping="Wrap" FontSize="13" Text="2. REAPER を起動（起動中なら再起動）。あとは自動でつながります" />
+                                <TextBlock x:Name="HowFlTitle" FontSize="13" FontWeight="SemiBold" Margin="0,6,0,0" Text="FL Studio" />
+                                <TextBlock x:Name="HowFl1" TextWrapping="Wrap" FontSize="13" Text="1. 上のボタンで FL Studio にスクリプトを入れ、FL Studio を起動（起動中なら再起動）" />
+                                <TextBlock x:Name="HowFl2" TextWrapping="Wrap" FontSize="13" Text="2. 「オプション」→「MIDI 設定」（F10）で MIDI 入力を選び、Controller type を「DAW Sync」にして有効にし、その入力と同じ名前の出力の Port に同じ番号を設定する" />
+                                <TextBlock x:Name="HowFl3" TextWrapping="Wrap" FontSize="13" Classes="subtle" Text="FL Studio で同期できるのはテンポ・拍子・ロケーターだけです" />
                             </StackPanel>
                         </Border>
                     </StackPanel>

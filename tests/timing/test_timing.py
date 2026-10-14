@@ -1,6 +1,6 @@
 """
-テンポ・拍子の変化（tempo_map / sig_map）の共通の形を、Live（model.py）・REAPER（model.lua）・Bitwig（TimingMaps.java）
-の 3 つの実装で同じ例（vectors.json）について確かめる。REAPER は reaper_mock.lua の上で、テンポマーカー・ロケーターの
+テンポ・拍子の変化（tempo_map / sig_map）の共通の形を、Live（model.py）・REAPER（model.lua）・Bitwig（TimingMaps.java）・
+FL Studio（device_DawSync.py）の 4 つの実装で同じ例（vectors.json）について確かめる。REAPER は reaper_mock.lua の上で、テンポマーカー・ロケーターの
 読み書きも確かめる。
 
   python tests/timing/test_timing.py
@@ -72,22 +72,23 @@ def compare(label, got):
 
 # ------------------------------------------------------------------ Live（Python）
 
-def python_results():
+def python_results(impl):
     out = {"tempo": [], "sig": [], "close": [], "set_tempo_at": []}
     for c in VECTORS["tempo"]:
-        rows = model.normalize_tempo_map(c["in"])
-        out["tempo"].append({"out": rows, "at": [model.tempo_at(rows, s[0]) for s in c.get("at", [])]})
+        rows = impl.normalize_tempo_map(c["in"])
+        out["tempo"].append({"out": rows, "at": [impl.tempo_at(rows, s[0]) for s in c.get("at", [])]})
     for c in VECTORS["sig"]:
-        rows = model.normalize_sig_map(c["in"])
-        out["sig"].append({"out": rows, "at": [model.sig_at(rows, s[0]) for s in c.get("at", [])]})
+        rows = impl.normalize_sig_map(c["in"])
+        out["sig"].append({"out": rows, "at": [impl.sig_at(rows, s[0]) for s in c.get("at", [])]})
+    # 「ほぼ同じか」は Live（.als を読むとき）だけが使う
     for c in VECTORS["close"]:
         out["close"].append(model.tempo_maps_close(c["a"], c["b"]))
     for c in VECTORS["set_tempo_at"]:
-        out["set_tempo_at"].append(model.set_tempo_at(c["in"], c["beat"], c["bpm"]))
+        out["set_tempo_at"].append(impl.set_tempo_at(c["in"], c["beat"], c["bpm"]))
     return out
 
 
-compare("Live", python_results())
+compare("Live", python_results(model))
 check("Live: Live のエンベロープ（点と点の間は直線）をテンポマップにする",
       model.tempo_events_to_map([(-63072000, 60), (4, 60), (8, 120), (12, 200)])
       == [[0.0, 60.0], [4.0, 60.0, 1], [8.0, 120.0, 1], [12.0, 200.0]])
@@ -129,6 +130,20 @@ def live_follow_checks():
 
 
 live_follow_checks()
+
+# ------------------------------------------------------------------ FL Studio（Python、モックの FL Studio の API の上）
+
+sys.path.insert(0, os.path.join(ROOT, "tests", "flstudio"))
+import mock_fl  # noqa: E402
+
+mock_fl.install()
+sys.path.insert(0, os.path.join(ROOT, "flstudio"))
+import device_DawSync as fl_script  # noqa: E402
+
+compare("FL Studio", python_results(fl_script))
+check("FL Studio: ロケーターの並べ方が Live と同じ",
+      fl_script.normalize_locators([[16, "B"], [4, None], [16, "A"], ["x", "bad"]])
+      == model.normalize_locators([[16, "B"], [4, None], [16, "A"], ["x", "bad"]]) == [[4.0, ""], [16.0, "A"], [16.0, "B"]])
 
 # ------------------------------------------------------------------ REAPER（Lua）
 

@@ -114,6 +114,9 @@ public sealed class SessionController : IAsyncDisposable
             _liveSynced = false;
             _dawName = name;
             Log(ActivityKind.System, "", $"{name} と接続しました");
+            if (Bridge.SupportedKeys is not null)
+                Log(ActivityKind.System, "", $"{name} で同期できるのは、テンポ・拍子・ロケーター（相手のものを足すだけ）です。" +
+                    "トラック・クリップ・ノートは同期されません（DAW のスクリプトの API で扱えないため）");
             Changed?.Invoke();
             _ = SyncWithLiveAsync();
         };
@@ -151,7 +154,7 @@ public sealed class SessionController : IAsyncDisposable
     private static bool IsCurrentScript(string? reported)
     {
         if (string.IsNullOrWhiteSpace(reported)) return false;
-        // Live はそのまま、REAPER/Bitwig は "reaper-1.0.2" / "bitwig-1.0.2"
+        // Live はそのまま、REAPER/Bitwig/FL Studio は "reaper-1.0.2" / "bitwig-1.0.2" / "flstudio-1.1.0"
         // の形で知らせる。接頭辞はDAW名なので、最後のバージョン部分だけ比較する。
         var version = reported;
         var dash = version.LastIndexOf('-');
@@ -162,12 +165,15 @@ public sealed class SessionController : IAsyncDisposable
     public void StartBridge(int port = LiveBridge.DefaultPort)
     {
         Bridge.Start(port);
-        // REAPER のスクリプトはファイルでやりとりするので、中継して同じポートにつなぐ
+        // REAPER・FL Studio のスクリプトはファイルでやりとりするので、中継して同じポートにつなぐ
         _reaper ??= new ReaperRelay(port);
         _reaper.Start();
+        _flStudio ??= new FlStudioRelay(port);
+        _flStudio.Start();
     }
 
     private ReaperRelay? _reaper;
+    private FlStudioRelay? _flStudio;
 
     // ---- ルーム ----
 
@@ -453,6 +459,7 @@ public sealed class SessionController : IAsyncDisposable
             {
                 "bitwig" => "Bitwig の拡張が古いバージョンです。アプリの「Bitwig の拡張を更新する」を押してください。",
                 "reaper" => "REAPER のスクリプトが古いバージョンです。アプリの「REAPER のスクリプトを更新する」を押してから REAPER を再起動してください。",
+                "flstudio" => "FL Studio のスクリプトが古いバージョンです。アプリの「FL Studio のスクリプトを更新する」を押してから FL Studio を再起動してください。",
                 _ => "Live のスクリプトが古いバージョンです。アプリの「Live のスクリプトを更新する」を押してから Live を再起動してください。",
             });
             return;
@@ -476,6 +483,7 @@ public sealed class SessionController : IAsyncDisposable
                 {
                     "bitwig" => "Bitwig のプロジェクトをまっさら（楽器トラック 1 本）にしました",
                     "reaper" => "REAPER のプロジェクトをまっさら（トラック 1 本）にしました",
+                    "flstudio" => "FL Studio のテンポと拍子を 120 BPM・4/4 にしました（FL Studio のスクリプトでは、プロジェクトの中身は消せません）",
                     _ => "Live のセットをまっさら（MIDI トラック 1 本）にしました",
                 });
             }
@@ -488,7 +496,7 @@ public sealed class SessionController : IAsyncDisposable
             {
                 // ルームの最初の状態はホストのセットから作る。ゲストはホストの Live がつながるのを待つ
                 _waitingForHost = true;
-                Log(ActivityKind.System, "", "ホストの DAW（Live・Bitwig・REAPER）が接続されるのを待っています");
+                Log(ActivityKind.System, "", "ホストの DAW（Live・Bitwig・REAPER・FL Studio）が接続されるのを待っています");
                 Changed?.Invoke();
                 return;
             }
@@ -528,6 +536,50 @@ public sealed class SessionController : IAsyncDisposable
                     Log(ActivityKind.System, "", $"切れている間の変更（{mine.Count} か所）をルームに送りました");
                 }
             }
+            if (Bridge.SupportedKeys is { } supported)
+            {
+                // FL Studio などトラックやクリップを扱えない DAW。ルームの中身はそのまま残し、扱えるもの（テンポなど）だけ合わせる。
+                // ルームにまだ無いもの（トラックの無い DAW がルームを作り、まだ誰も送っていない）は、こちらの値をルームに入れる
+                lock (_held) _adopted = true;
+                var missing = await ToRoomAsync(live.Where(o => supported.Contains(o.Key) && o.Value is not null && !room.ContainsKey(o.Key))
+                    .GroupBy(o => o.Key).Select(g => g.Last()).ToList(), upload: true);
+                if (missing.Count > 0)
+                {
+                    UpdateRoomState(missing);
+                    client.Send(missing, fromLive: false);
+                }
+                var partial = room
+                    .Where(kv => supported.Contains(kv.Key)
+                                 && (!liveRoom.TryGetValue(kv.Key, out var current) || !JsonNode.DeepEquals(current, kv.Value)))
+                    .Select(kv => new Op(kv.Key, kv.Value))
+                    .ToList();
+                Bridge.Apply(await ToLocalAsync(partial), force: true);
+                release = FinishSync(partial);
+                return;
+            }
+
+            if (!room.Keys.Any(IsStructural) && liveRoom.Keys.Any(IsStructural))
+            {
+                // ルームにトラックが無い（FL Studio などトラックを扱えない DAW がルームを作った）。このセットのトラック・
+                // クリップをルームに入れ、テンポなどルームにあるものはルームに合わせる
+                lock (_held) _adopted = true;
+                var mine = live.Where(o => o.Value is not null && !room.ContainsKey(o.Key))
+                    .GroupBy(o => o.Key).Select(g => g.Last()).ToList();
+                var files = mine.Count(o => o.Value?.ToJsonString().Contains("\"file\"", StringComparison.Ordinal) == true);
+                if (files > 0) Log(ActivityKind.System, "", $"サンプルなどのファイル（{files} 個）を共有しています…");
+                var shared = await ToRoomAsync(mine, upload: true);
+                UpdateRoomState(shared);
+                client.Send(shared, fromLive: false);
+                Log(ActivityKind.System, "", $"ルームにトラックが無かったので、このセットのトラックやクリップをルームに共有しました（{shared.Count} か所）");
+                var merged = room
+                    .Where(kv => !liveRoom.TryGetValue(kv.Key, out var current) || !JsonNode.DeepEquals(current, kv.Value))
+                    .Select(kv => new Op(kv.Key, kv.Value))
+                    .ToList();
+                Bridge.Apply(await ToLocalAsync(merged), force: true);
+                release = FinishSync(merged);
+                return;
+            }
+
             if (!overwrite && CheckSameSet(room, liveRoom) is { } problem)
             {
                 Pause(problem, canOverwrite: true);
@@ -556,16 +608,7 @@ public sealed class SessionController : IAsyncDisposable
                     .Select(kv => new Op(kv.Key, kv.Value)))
                 .ToList();
             Bridge.Apply(await ToLocalAsync(diff), force: true);
-            _liveSynced = true;
-            // 合わせている間の自分の変更は、ID を付け替えた後のもので、ルームの値で上書きしなかったところだけ送る
-            var overwritten = diff.Select(o => o.Key).ToHashSet();
-            release = (op, beforeAdopt) => !beforeAdopt && !overwritten.Contains(op.Key);
-            _waitingForHost = false;
-            _overwriteNext = false;
-            PausedReason = null;
-            CanOverwrite = false;
-            Log(ActivityKind.System, "", diff.Count == 0 ? "ルームと同じ状態です" : $"ルームの状態に合わせました（{diff.Count} か所）");
-            Changed?.Invoke();
+            release = FinishSync(diff);
         }
         catch (Exception e) when (!_cts.IsCancellationRequested)
         {
@@ -577,6 +620,21 @@ public sealed class SessionController : IAsyncDisposable
             ReleaseHeld(release);
             _syncLock.Release();
         }
+    }
+
+    /// <summary>ルームの状態に合わせ終わった（diff はルームの値で上書きしたところ）。合わせている間の自分の変更のうち、送るものを返す。</summary>
+    private Func<Op, bool, bool> FinishSync(List<Op> diff)
+    {
+        _liveSynced = true;
+        // 合わせている間の自分の変更は、ID を付け替えた後のもので、ルームの値で上書きしなかったところだけ送る
+        var overwritten = diff.Select(o => o.Key).ToHashSet();
+        _waitingForHost = false;
+        _overwriteNext = false;
+        PausedReason = null;
+        CanOverwrite = false;
+        Log(ActivityKind.System, "", diff.Count == 0 ? "ルームと同じ状態です" : $"ルームの状態に合わせました（{diff.Count} か所）");
+        Changed?.Invoke();
+        return (op, beforeAdopt) => !beforeAdopt && !overwritten.Contains(op.Key);
     }
 
     /// <summary>合わせている間に預かった自分の変更を、送るものは送る列へ、それ以外は処理済みとして DAW に伝える。</summary>
@@ -1110,6 +1168,7 @@ public sealed class SessionController : IAsyncDisposable
         if (_server is not null) await _server.DisposeAsync();
         if (_tunnel is not null) await _tunnel.DisposeAsync();
         if (_reaper is not null) await _reaper.DisposeAsync();
+        if (_flStudio is not null) await _flStudio.DisposeAsync();
         await Bridge.DisposeAsync();
     }
 }

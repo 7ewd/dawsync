@@ -16,6 +16,11 @@
     <EmbeddedResource Include="..\..\reaper\*.lua" LogicalName="ReaperScript/%(Filename)%(Extension)" />
   </ItemGroup>
 
+  <!-- FL Studio に入れる MIDI スクリプト（Python） -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\flstudio\*.py" LogicalName="FlStudioScript/%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <!-- Bitwig に入れる拡張（bitwig/build.sh で作る。Bitwig の内部 API を使うので、Bitwig のある PC でビルドしてここに置く） -->
   <ItemGroup>
     <EmbeddedResource Include="BitwigExtension\DawSync.bwextension" LogicalName="BitwigExtension/DawSync.bwextension"

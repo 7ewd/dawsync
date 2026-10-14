@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace DawSync.Core.Sync;
@@ -32,8 +33,17 @@ public sealed class LiveBridge : IAsyncDisposable
     public bool IsConnected => _connection is not null;
     public string? LiveVersion { get; private set; }
 
-    /// <summary>つながっている DAW（"live"・"bitwig"・"reaper"）。</summary>
+    /// <summary>つながっている DAW（"live"・"bitwig"・"reaper"・"flstudio"）。</summary>
     public string Daw { get; private set; } = "live";
+
+    /// <summary>
+    /// DAW が扱えるキー（hello の keys）。null ならすべて扱える。FL Studio のようにトラックやクリップを扱えない DAW は、
+    /// テンポなど扱えるものだけを知らせてくるので、それ以外は渡さない（ルームの中身はそのまま残る）。
+    /// </summary>
+    public IReadOnlySet<string>? SupportedKeys { get; private set; }
+
+    /// <summary>つながっている DAW がこのキーを扱えるか。</summary>
+    public bool Supports(string key) => SupportedKeys is not { } keys || keys.Contains(key);
 
     /// <summary>画面に出す DAW の名前（「Ableton Live 12.4.6」「Bitwig Studio 6.0」など）。</summary>
     public string DawName => Daw == "live" ? $"Ableton Live {LiveVersion}".TrimEnd() : LiveVersion ?? Daw;
@@ -67,6 +77,7 @@ public sealed class LiveBridge : IAsyncDisposable
     /// </param>
     public void Apply(IReadOnlyList<Op> ops, bool force = false)
     {
+        if (SupportedKeys is not null) ops = ops.Where(o => Supports(o.Key)).ToList();
         if (ops.Count > 0)
             _connection?.Send(new JsonObject { ["t"] = "apply", ["force"] = force, ["ops"] = Op.ToArray(ops) });
     }
@@ -176,6 +187,10 @@ public sealed class LiveBridge : IAsyncDisposable
                         Daw = (string?)msg["daw"] ?? "live";
                         ScriptVersion = (string?)msg["script"];
                         ScriptProtocolVersion = (int?)msg["proto"] ?? 1;
+                        SupportedKeys = msg["keys"] is JsonArray keys
+                            ? keys.Select(k => k?.GetValueKind() == JsonValueKind.String ? (string?)k : null)
+                                .OfType<string>().ToHashSet(StringComparer.Ordinal)
+                            : null;
                         helloReceived = true;
                         Connected?.Invoke(DawName);
                         break;

@@ -127,6 +127,7 @@ public partial class SessionView : UserControl
         InstallButton.Click += (_, _) => RunAction("スクリプトを入れられませんでした", InstallScript);
         BitwigInstallButton.Click += (_, _) => RunAction("Bitwig に拡張を入れられませんでした", InstallBitwigExtension);
         ReaperInstallButton.Click += (_, _) => RunAction("REAPER にスクリプトを入れられませんでした", InstallReaperScript);
+        FlStudioInstallButton.Click += (_, _) => RunAction("FL Studio にスクリプトを入れられませんでした", InstallFlStudioScript);
         HowToToggle.Click += (_, _) => ShowHowTo(!HowToPanel.IsVisible);
         HostButton.Click += (_, _) => RunAction("ルームを作れませんでした", () => HostAsync(startBlank: null));
         JoinButton.Click += (_, _) => RunAction("ルームに参加できませんでした", JoinAsync);
@@ -203,6 +204,9 @@ public partial class SessionView : UserControl
         HowBitwig2.Text = T("bitwig_2");
         HowReaper1.Text = T("reaper_1");
         HowReaper2.Text = T("reaper_2");
+        HowFl1.Text = T("fl_1");
+        HowFl2.Text = T("fl_2");
+        HowFl3.Text = T("fl_3");
         NameLabel.Text = T("your_name");
         NameBox.PlaceholderText = T("name_placeholder");
         HostButton.Content = T("create_room");
@@ -623,6 +627,23 @@ public partial class SessionView : UserControl
         Refresh();
     }
 
+    private void InstallFlStudioScript()
+    {
+        try
+        {
+            var path = FlStudioScriptInstaller.Install();
+            ShowHowTo(true);
+            AddActivity(new ActivityEntry(DateTime.Now, ActivityKind.System, "",
+                $"FL Studio にスクリプトを入れました（FL Studio を再起動し、MIDI 設定で Controller type を「DAW Sync」にして、入力と出力の Port を同じ番号にすると動きます）: {path}"));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            AddActivity(new ActivityEntry(DateTime.Now, ActivityKind.Warning, "", $"FL Studio にスクリプトを入れられませんでした: {Describe(e)}"));
+        }
+        UpdateEnvironmentNow();
+        Refresh();
+    }
+
     private void OnCopyAddress(object? sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string address } button)
@@ -710,11 +731,11 @@ public partial class SessionView : UserControl
     // ---- インストール状態・アドレスの確認（5 秒ごと）----
 
     private sealed record InstallStates(
-        bool LivePresent, bool BitwigPresent, bool ReaperPresent,
-        ScriptInstallState Live, ScriptInstallState Bitwig, ScriptInstallState Reaper)
+        bool LivePresent, bool BitwigPresent, bool ReaperPresent, bool FlStudioPresent,
+        ScriptInstallState Live, ScriptInstallState Bitwig, ScriptInstallState Reaper, ScriptInstallState FlStudio)
     {
-        public static readonly InstallStates Unknown = new(true, false, false,
-            ScriptInstallState.Installed, ScriptInstallState.Installed, ScriptInstallState.Installed);
+        public static readonly InstallStates Unknown = new(true, false, false, false,
+            ScriptInstallState.Installed, ScriptInstallState.Installed, ScriptInstallState.Installed, ScriptInstallState.Installed);
     }
 
     private static T Try<T>(Func<T> read, T fallback)
@@ -735,9 +756,11 @@ public partial class SessionView : UserControl
             Try(RemoteScriptInstaller.IsLivePresent, true),
             Try(BitwigExtensionInstaller.IsBitwigPresent, false),
             Try(ReaperScriptInstaller.IsReaperPresent, false),
+            Try(FlStudioScriptInstaller.IsFlStudioPresent, false),
             Try(RemoteScriptInstaller.GetState, ScriptInstallState.Installed),
             Try(BitwigExtensionInstaller.GetState, ScriptInstallState.Installed),
-            Try(ReaperScriptInstaller.GetState, ScriptInstallState.Installed)),
+            Try(ReaperScriptInstaller.GetState, ScriptInstallState.Installed),
+            Try(FlStudioScriptInstaller.GetState, ScriptInstallState.Installed)),
         Try(() => (IReadOnlyList<string>)RoomServer.LocalAddresses().ToList(), []));
 
     /// <summary>今すぐ調べ直す（起動時と、スクリプトを入れた直後）。</summary>
@@ -793,10 +816,11 @@ public partial class SessionView : UserControl
         // つながっていれば手順は不要（古いスクリプトのときだけ更新を促す）
         HowToToggle.IsVisible = !live.IsConnected;
         if (live.IsConnected) ShowHowTo(false);
-        // Live だけ／Bitwig だけの PC では、使わない方のボタンは出さない（どちらも見つからなければ Live 用を出す）
+        // Live だけ／Bitwig だけの PC では、使わない方のボタンは出さない（どれも見つからなければ Live 用を出す）
         var bitwigPresent = install.BitwigPresent;
         var reaperPresent = install.ReaperPresent;
-        var livePresent = install.LivePresent || (!bitwigPresent && !reaperPresent);
+        var flPresent = install.FlStudioPresent;
+        var livePresent = install.LivePresent || (!bitwigPresent && !reaperPresent && !flPresent);
         var scriptState = install.Live;
         (InstallButton.Content, InstallButton.IsVisible) = scriptState switch
         {
@@ -813,6 +837,14 @@ public partial class SessionView : UserControl
             ScriptInstallState.Outdated => (T("reaper_update"), true),
             _ => ("", false),
         };
+        var flState = install.FlStudio;
+        (FlStudioInstallButton.Content, FlStudioInstallButton.IsVisible) = flState switch
+        {
+            _ when !flPresent => ("", false),
+            ScriptInstallState.NotInstalled => (T("fl_install"), true),
+            ScriptInstallState.Outdated => (T("fl_update"), true),
+            _ => ("", false),
+        };
         var bitwigState = install.Bitwig;
         (BitwigInstallButton.Content, BitwigInstallButton.IsVisible) = bitwigState switch
         {
@@ -822,7 +854,8 @@ public partial class SessionView : UserControl
             _ => ("", false),
         };
         if ((scriptState == ScriptInstallState.NotInstalled || bitwigPresent && bitwigState == ScriptInstallState.NotInstalled
-             || reaperPresent && reaperState == ScriptInstallState.NotInstalled)
+             || reaperPresent && reaperState == ScriptInstallState.NotInstalled
+             || flPresent && flState == ScriptInstallState.NotInstalled)
             && !live.IsConnected && !_howToShownOnce)
         {
             _howToShownOnce = true;

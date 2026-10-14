@@ -67,6 +67,10 @@
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="0" />
         </Style>
+        <!-- DAW の連携を入れるボタン（「…を更新する（そのあと…を再起動）」は長いので折り返す） -->
+        <Style Selector="Button.install /template/ ContentPresenter">
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
         <Style Selector="Button:pointerover">
             <Setter Property="Background" Value="#FFFFFF" />
             <Setter Property="Foreground" Value="#000000" />

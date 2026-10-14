@@ -12,3 +12,4 @@ __pycache__/
 *.pyc
 tests/reaper/logs/
 tests/live/logs/
+tests/flstudio/logs/
